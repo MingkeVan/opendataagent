@@ -1,0 +1,88 @@
+from __future__ import annotations
+
+import argparse
+import time
+
+from app.core.config import get_settings
+from app.db.init_schema import init_schema
+from app.db.session import session_scope
+from app.engines.claude_agent_sdk import ClaudeAgentSdkAdapter
+from app.services.conversation_service import get_conversation
+from app.services.run_service import (
+    append_run_event,
+    claim_next_run,
+    complete_run,
+    fail_run,
+    get_last_user_prompt,
+    get_latest_seq,
+    get_run,
+    get_skill_snapshot,
+)
+
+
+def _process_run(run_id: str) -> None:
+    adapter = ClaudeAgentSdkAdapter()
+
+    with session_scope() as session:
+        run = get_run(session, run_id)
+        if run is None:
+            return
+        conversation = get_conversation(session, run.conversation_id)
+        snapshot = get_skill_snapshot(session, run.skill_snapshot_id)
+        prompt = get_last_user_prompt(session, run.conversation_id)
+        conversation_title = conversation.title if conversation is not None else "对话"
+        seq = get_latest_seq(session, run.id)
+
+    process = adapter.launch(run_id=run_id, skill_id=snapshot.skill_id, prompt=prompt, conversation_title=conversation_title)
+
+    try:
+        for raw_event in adapter.iter_raw_events(process):
+            mapped_events = adapter.map_event(raw_event)
+            for payload in mapped_events:
+                with session_scope() as session:
+                    run = get_run(session, run_id)
+                    if run is None:
+                        adapter.cancel(process)
+                        return
+                    if run.cancel_requested:
+                        adapter.cancel(process)
+                        fail_run(session, run, "cancelled", "cancelled", "Run cancelled by user")
+                        return
+                    seq += 1
+                    append_run_event(session, run, seq, payload, raw_event)
+                    if payload["type"] == "finish":
+                        complete_run(session, run, "completed")
+                        return
+    except Exception as exc:
+        with session_scope() as session:
+            run = get_run(session, run_id)
+            if run is not None:
+                fail_run(session, run, "failed", "worker_error", str(exc))
+        raise
+
+
+def process_next_run() -> str | None:
+    with session_scope() as session:
+        run = claim_next_run(session)
+    if run is None:
+        return None
+    _process_run(run.id)
+    return run.id
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--once", action="store_true")
+    args = parser.parse_args()
+    init_schema()
+    poll_interval = get_settings().worker_poll_interval_ms / 1000
+    while True:
+        run_id = process_next_run()
+        if args.once:
+            break
+        if run_id is None:
+            time.sleep(poll_interval)
+
+
+if __name__ == "__main__":
+    main()

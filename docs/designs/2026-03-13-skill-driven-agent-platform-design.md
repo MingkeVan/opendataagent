@@ -1,7 +1,7 @@
 # 基于 Skill 管理的通用 Agent 平台设计
 
 - 日期：2026-03-13
-- 状态：v1 设计稿
+- 状态：v1 设计稿，已按 MVP 落地
 - 适用范围：单组织内部平台，MySQL-only，自托管部署
 
 ## 1. 概述
@@ -48,12 +48,17 @@
 
 ### 3.2 后端
 
-- `Python 3.11+`
+- `Python 3.9+`
 - `FastAPI`
 - `SQLAlchemy 2.x` 或 `sqlmodel`
 - `Pydantic v2`
 - `Claude Agent SDK Python`
 - `SSE` 输出
+
+v1 实际实现说明：
+
+- 当前仓库默认以 `mock agent process` 模拟 Claude Agent SDK 流式事件，保证本地开发、测试和浏览器联调可重复
+- `EngineAdapter`、子进程边界、run queue、event mapping 和前端 parts 渲染都已经落地，后续切换到真实 Claude Agent SDK 时不需要改动上层 API 契约
 
 ### 3.3 存储
 
@@ -207,6 +212,11 @@ session_policy:
 - `artifactPreview`
 
 消息渲染只依赖 `message.parts`，不直接拼接原始文本。
+
+v1 实际实现说明：
+
+- 当前前端依旧按 `UIMessage.parts` 组织消息状态
+- 具体流式消费实现使用原生 `EventSource` 连接后端 SSE，再在前端本地聚合成 `parts`
 
 ## 7.3 UIMessage.parts 映射
 

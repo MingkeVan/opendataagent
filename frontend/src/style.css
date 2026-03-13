@@ -1,0 +1,33 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  color: #152320;
+  background: #f5f1e7;
+  font-family:
+    "IBM Plex Sans",
+    "PingFang SC",
+    "Hiragino Sans GB",
+    sans-serif;
+  line-height: 1.5;
+  font-weight: 400;
+  font-synthesis: none;
+  text-rendering: optimizeLegibility;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+body {
+  margin: 0;
+}
+
+#app {
+  min-height: 100vh;
+}
+
+.reasoning-collapse {
+  --el-collapse-border-color: transparent;
+  --el-collapse-header-bg-color: rgba(245, 241, 231, 0.6);
+  --el-collapse-content-bg-color: rgba(255, 255, 255, 0.6);
+}

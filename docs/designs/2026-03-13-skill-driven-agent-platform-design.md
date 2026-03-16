@@ -48,7 +48,7 @@
 
 ### 3.2 后端
 
-- `Python 3.9+`
+- `Python 3.10+`
 - `FastAPI`
 - `SQLAlchemy 2.x` 或 `sqlmodel`
 - `Pydantic v2`

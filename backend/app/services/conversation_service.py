@@ -28,6 +28,9 @@ def serialize_message(message: Message) -> dict:
         "runId": message.run_id,
         "role": message.role,
         "uiParts": message.ui_parts,
+        "contentBlocks": message.content_blocks or [],
+        "traceSummary": message.trace_summary,
+        "finalText": message.final_text,
         "status": message.status,
         "createdAt": message.created_at.isoformat(),
     }
@@ -68,4 +71,3 @@ def list_messages(session: Session, conversation_id: str) -> list[Message]:
             .order_by(Message.created_at.asc(), Message.id.asc())
         )
     )
-

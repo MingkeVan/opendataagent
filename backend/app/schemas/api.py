@@ -45,6 +45,9 @@ class MessageResponse(BaseModel):
     runId: Optional[str]
     role: str
     uiParts: List[Dict[str, Any]]
+    contentBlocks: List[Dict[str, Any]] = Field(default_factory=list)
+    traceSummary: Optional[Dict[str, Any]] = None
+    finalText: Optional[str] = None
     status: str
     createdAt: str
 
@@ -60,3 +63,16 @@ class MessageCreateResponse(BaseModel):
 class RunCancelResponse(BaseModel):
     runId: str
     status: str
+
+
+class ArtifactResponse(BaseModel):
+    id: str
+    runId: str
+    conversationId: str
+    artifactType: str
+    mimeType: str
+    sizeBytes: int
+    contentJson: Optional[Dict[str, Any]] = None
+    contentText: Optional[str] = None
+    metadataJson: Dict[str, Any] = Field(default_factory=dict)
+    createdAt: str

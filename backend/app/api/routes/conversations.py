@@ -50,7 +50,7 @@ def create_message_route(conversation_id: str, payload: MessageCreateRequest, se
     conversation = get_conversation(session, conversation_id)
     if conversation is None:
         raise HTTPException(status_code=404, detail="Conversation not found")
-    user_message, assistant_message, run = create_run(session, conversation, payload.content)
+    user_message, assistant_message, run = create_run(session, conversation, payload.content, payload.attachments)
     return {
         "conversationId": conversation.id,
         "userMessageId": user_message.id,
@@ -58,4 +58,3 @@ def create_message_route(conversation_id: str, payload: MessageCreateRequest, se
         "runId": run.id,
         "status": run.status,
     }
-

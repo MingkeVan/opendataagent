@@ -118,7 +118,7 @@
 - [base.py](/Users/guoruping/.codex/worktrees/f5b1/opendataagent/backend/app/engines/base.py)
 - [claude_agent_sdk.py](/Users/guoruping/.codex/worktrees/f5b1/opendataagent/backend/app/engines/claude_agent_sdk.py)
 - [main.py](/Users/guoruping/.codex/worktrees/f5b1/opendataagent/backend/app/worker/main.py)
-- [mock_agent_process.py](/Users/guoruping/.codex/worktrees/f5b1/opendataagent/backend/app/runtime/mock_agent_process.py)
+- [claude_agent_sdk_process.py](/Users/guoruping/.codex/worktrees/4d77/opendataagent/backend/app/runtime/claude_agent_sdk_process.py)
 
 验证方式：
 
@@ -286,7 +286,7 @@ cd frontend && npm run build
 
 - FastAPI 启动事件可以后续迁移到 lifespan API，以消除弃用告警
 - 前端可以继续做 chunk 拆分，以优化构建警告
-- 当前默认运行器是 `mock agent process`，后续替换为真实 Claude Agent SDK 时无需调整上层协议
+- 当前默认运行器就是 `claude_agent_sdk_process`；测试与本地演示通过 fixture 数据模式复用同一条执行链，无需维护单独 mock 运行器
 
 ## 6. 结论
 

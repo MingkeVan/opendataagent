@@ -46,4 +46,4 @@
 2. **交互功能验证 (Interaction Testing)**：
    - 测试各类交互动作（Thinking 展开/折叠，Tool Call 状态流转），以及大型复杂数据的侧板/面板加载是否与选定风格的交互逻辑相符。
 3. **集成验证 (End-to-End)**：
-   - 连接真实的后端 API（或者内置 mock 数据），走通对话流并验证数据图表正常渲染。
+   - 连接真实的后端 API；本地调试与测试使用 fixture 数据模式，但仍走同一个 Claude Agent SDK runtime 与流协议。

@@ -36,10 +36,37 @@ class Message(Base):
     role = Column(String(16), nullable=False)
     raw_blocks = Column(JSON, nullable=True)
     ui_parts = Column(JSON, nullable=False)
+    content_blocks = Column(JSON, nullable=True)
+    trace_summary = Column(JSON, nullable=True)
+    final_text = Column(Text, nullable=True)
     usage_json = Column(JSON, nullable=True)
     status = Column(String(32), nullable=False)
     created_at = Column(DateTime(timezone=False), default=utcnow, nullable=False)
     updated_at = Column(DateTime(timezone=False), default=utcnow, onupdate=utcnow, nullable=False)
+
+
+class MessageBlock(Base):
+    __tablename__ = "message_blocks"
+
+    id = Column(String(36), primary_key=True)
+    message_id = Column(String(36), nullable=False, index=True)
+    conversation_id = Column(String(36), nullable=False, index=True)
+    run_id = Column(String(36), nullable=True, index=True)
+    role = Column(String(16), nullable=False)
+    step_index = Column(Integer, nullable=True)
+    block_index = Column(Integer, nullable=False)
+    block_type = Column(String(64), nullable=False)
+    tool_call_id = Column(String(128), nullable=True)
+    visibility = Column(String(32), nullable=False, default="user")
+    payload_json = Column(JSON, nullable=False)
+    raw_provider_json = Column(JSON, nullable=True)
+    created_at = Column(DateTime(timezone=False), default=utcnow, nullable=False)
+
+    __table_args__ = (
+        UniqueConstraint("message_id", "block_index", name="uk_message_block_index"),
+        Index("idx_message_block_message", "message_id", "block_index"),
+        Index("idx_message_block_run", "run_id", "step_index", "block_index"),
+    )
 
 
 class Run(Base):
@@ -55,10 +82,36 @@ class Run(Base):
     stop_reason = Column(String(64), nullable=True)
     error_code = Column(String(64), nullable=True)
     error_message = Column(Text, nullable=True)
+    context_json = Column(JSON, nullable=True)
     started_at = Column(DateTime(timezone=False), nullable=True)
     ended_at = Column(DateTime(timezone=False), nullable=True)
     created_at = Column(DateTime(timezone=False), default=utcnow, nullable=False)
     updated_at = Column(DateTime(timezone=False), default=utcnow, onupdate=utcnow, nullable=False)
+
+
+class RunStep(Base):
+    __tablename__ = "run_steps"
+
+    id = Column(String(36), primary_key=True)
+    run_id = Column(String(36), nullable=False, index=True)
+    step_index = Column(Integer, nullable=False)
+    step_id = Column(String(128), nullable=False)
+    title = Column(String(255), nullable=True)
+    status = Column(String(32), nullable=False, default="running")
+    agent_session_id = Column(String(128), nullable=True)
+    model = Column(String(128), nullable=True)
+    stop_reason = Column(String(64), nullable=True)
+    usage_json = Column(JSON, nullable=True)
+    started_at = Column(DateTime(timezone=False), nullable=True)
+    ended_at = Column(DateTime(timezone=False), nullable=True)
+    created_at = Column(DateTime(timezone=False), default=utcnow, nullable=False)
+    updated_at = Column(DateTime(timezone=False), default=utcnow, onupdate=utcnow, nullable=False)
+
+    __table_args__ = (
+        UniqueConstraint("run_id", "step_index", name="uk_run_step_index"),
+        UniqueConstraint("run_id", "step_id", name="uk_run_step_id"),
+        Index("idx_run_step_order", "run_id", "step_index"),
+    )
 
 
 class RunEvent(Base):
@@ -86,6 +139,7 @@ class ToolCall(Base):
     id = Column(String(36), primary_key=True)
     run_id = Column(String(36), nullable=False, index=True)
     message_id = Column(String(36), nullable=True)
+    step_index = Column(Integer, nullable=True)
     tool_call_id = Column(String(128), nullable=False)
     tool_name = Column(String(128), nullable=False)
     input_json = Column(JSON, nullable=True)

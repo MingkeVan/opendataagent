@@ -57,7 +57,7 @@
 
 v1 实际实现说明：
 
-- 当前仓库默认以 `mock agent process` 模拟 Claude Agent SDK 流式事件，保证本地开发、测试和浏览器联调可重复
+- 当前仓库默认以同一个 `claude_agent_sdk_process` 走完整执行链；本地开发、测试和浏览器联调通过 fixture 数据模式复用真实 runtime，而不是单独维护 mock 进程
 - `EngineAdapter`、子进程边界、run queue、event mapping 和前端 parts 渲染都已经落地，后续切换到真实 Claude Agent SDK 时不需要改动上层 API 契约
 
 ### 3.3 存储

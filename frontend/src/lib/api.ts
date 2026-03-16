@@ -1,4 +1,4 @@
-import type { Conversation, Message, SkillSummary } from '../types'
+import type { ArtifactResponse, Conversation, Message, SkillSummary } from '../types'
 
 const API_BASE = import.meta.env.VITE_API_BASE || 'http://127.0.0.1:8000'
 
@@ -11,8 +11,17 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
     ...init,
   })
   if (!response.ok) {
-    const message = await response.text()
-    throw new Error(message || `Request failed: ${response.status}`)
+    const bodyText = await response.text()
+    let message = bodyText || `Request failed: ${response.status}`
+    if (bodyText) {
+      try {
+        const body = JSON.parse(bodyText)
+        message = typeof body?.detail === 'string' ? body.detail : JSON.stringify(body)
+      } catch {
+        message = bodyText
+      }
+    }
+    throw new Error(message)
   }
   return response.json() as Promise<T>
 }
@@ -60,3 +69,6 @@ export function cancelRun(runId: string) {
   })
 }
 
+export function fetchArtifact(artifactId: string) {
+  return request<ArtifactResponse>(`/api/artifacts/${artifactId}`)
+}

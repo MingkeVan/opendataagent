@@ -32,6 +32,7 @@ class Message(Base):
 
     id = Column(String(36), primary_key=True)
     conversation_id = Column(String(36), nullable=False, index=True)
+    sequence_no = Column(Integer, nullable=True)
     run_id = Column(String(36), nullable=True, index=True)
     role = Column(String(16), nullable=False)
     raw_blocks = Column(JSON, nullable=True)

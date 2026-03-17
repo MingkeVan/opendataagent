@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import argparse
+import sys
 import time
+import traceback
 
 from app.core.config import get_settings
 from app.db.init_schema import init_schema
@@ -18,6 +20,7 @@ from app.services.run_service import (
     get_run,
     get_skill_snapshot,
     process_agent_event,
+    reconcile_inflight_runs,
     update_run_context,
 )
 
@@ -28,6 +31,9 @@ def _process_run(run_id: str) -> None:
     with session_scope() as session:
         run = get_run(session, run_id)
         if run is None:
+            return
+        if run.cancel_requested:
+            fail_run(session, run, "cancelled", "cancelled", "Run cancelled before execution")
             return
         conversation = get_conversation(session, run.conversation_id)
         snapshot = get_skill_snapshot(session, run.skill_snapshot_id)
@@ -74,7 +80,8 @@ def _process_run(run_id: str) -> None:
             run = get_run(session, run_id)
             if run is not None:
                 fail_run(session, run, "failed", "worker_error", str(exc))
-        raise
+        traceback.print_exc(file=sys.stderr)
+        return
 
 
 def process_next_run() -> str | None:
@@ -91,6 +98,8 @@ def main() -> None:
     parser.add_argument("--once", action="store_true")
     args = parser.parse_args()
     init_schema()
+    with session_scope() as session:
+        reconcile_inflight_runs(session)
     poll_interval = get_settings().worker_poll_interval_ms / 1000
     while True:
         run_id = process_next_run()

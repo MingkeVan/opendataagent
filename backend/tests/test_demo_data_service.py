@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from app.core.config import reset_settings_cache
-from app.services.demo_data_service import execute_readonly_query, load_schema_metadata, normalize_readonly_sql, seed_demo_schema
+from app.services.demo_data_service import execute_readonly_query, load_schema_metadata, normalize_readonly_sql, render_schema_context, seed_demo_schema
 
 
 def test_seed_demo_schema_and_query_flow(monkeypatch) -> None:
@@ -15,6 +15,10 @@ def test_seed_demo_schema_and_query_flow(monkeypatch) -> None:
     metadata = load_schema_metadata()
     assert metadata["database"] == "opendata_agent_demo_test"
     assert [table["name"] for table in metadata["tables"]] == ["customers", "order_items", "orders", "products"]
+    schema_context = render_schema_context(metadata)
+    assert "Business term mapping:" in schema_context
+    assert "按客户统计销售额" in schema_context
+    assert "orders.customer_id -> customers.id" in schema_context
 
     order_count = execute_readonly_query("SELECT COUNT(*) AS order_count FROM orders")
     assert order_count.columns == ["order_count"]

@@ -20,6 +20,7 @@ export interface Conversation {
 export interface Message {
   id: string
   conversationId: string
+  sequenceNo?: number | null
   runId: string | null
   role: 'user' | 'assistant'
   uiParts: UiPart[]

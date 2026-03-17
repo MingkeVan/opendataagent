@@ -40,6 +40,9 @@ def test_conversation_run_and_history_flow(client) -> None:
         assert messages.status_code == 200
         body = messages.json()
         assert len(body) == 2
+        assert [item["role"] for item in body] == ["user", "assistant"]
+        assert body[0]["sequenceNo"] == 1
+        assert body[1]["sequenceNo"] == 2
         assistant = next(item for item in body if item["role"] == "assistant")
         if len(assistant["uiParts"]) > 1:
             break
@@ -55,6 +58,7 @@ def test_conversation_run_and_history_flow(client) -> None:
     assert assistant["contentBlocks"]
     assert assistant["traceSummary"]["stepCount"] == 1
     assert assistant["traceSummary"]["toolCallCount"] == 1
+    assert assistant["traceSummary"]["status"] == "completed"
     assert assistant["finalText"]
 
     stream = client.get(f"/api/runs/{run_id}/stream?after_seq=0")
@@ -68,6 +72,22 @@ def test_conversation_run_and_history_flow(client) -> None:
     assert '"type": "finish"' in content
     assert '"kind": "done"' in content
     assert "[DONE]" in content
+
+
+def test_first_prompt_updates_placeholder_conversation_title(client) -> None:
+    conversation = client.post("/api/conversations", json={"skillId": "demo-analyst"}).json()
+    assert conversation["title"] == "新建会话"
+
+    first_prompt = "这个月哪个用户产生的销售额最多？"
+    payload = client.post(
+        f"/api/conversations/{conversation['id']}/messages",
+        json={"content": first_prompt, "attachments": []},
+    )
+    assert payload.status_code == 200
+
+    updated = client.get(f"/api/conversations/{conversation['id']}")
+    assert updated.status_code == 200
+    assert updated.json()["title"] == first_prompt
 
 
 def test_stream_after_seq_filters_history(client) -> None:
@@ -143,9 +163,11 @@ def test_simple_explanatory_prompt_does_not_force_tool_call(client) -> None:
     types = [part["type"] for part in assistant["uiParts"]]
     assert "text" in types
     assert "tool-call" not in types
-    assert "reasoning" in types
+    assert "reasoning" not in types
     assert "智能体" in assistant["finalText"]
     assert assistant["traceSummary"]["toolCallCount"] == 0
+    assert assistant["traceSummary"]["hasReasoning"] is False
+    assert assistant["traceSummary"]["status"] == "completed"
 
     stream = client.get(f"/api/runs/{payload['runId']}/stream?after_seq=0").text
     assert '"kind": "snapshot"' in stream
@@ -170,10 +192,13 @@ def test_multi_turn_follow_up_reuses_local_context(client) -> None:
     assert messages.status_code == 200
     body = messages.json()
     assistants = [item for item in body if item["role"] == "assistant"]
+    assert [item["role"] for item in body] == ["user", "assistant", "user", "assistant"]
+    assert [item["sequenceNo"] for item in body] == [1, 2, 3, 4]
     assert len(assistants) == 2
     latest = assistants[-1]
     assert "上一轮上下文" in latest["finalText"]
     assert latest["traceSummary"]["toolCallCount"] == 1
+    assert latest["traceSummary"]["status"] == "completed"
     assert any(part["type"] == "data-table" for part in latest["uiParts"])
 
     with session_scope() as session:

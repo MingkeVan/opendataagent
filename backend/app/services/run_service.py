@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import re
 from collections import OrderedDict, defaultdict
 from datetime import timedelta
 from typing import Any
@@ -22,6 +23,7 @@ from app.models.entities import (
     SkillSnapshot,
     ToolCall,
 )
+from app.services.conversation_service import derive_conversation_title_from_prompt, is_placeholder_conversation_title
 from app.services.skill_loader import get_skill_loader
 
 TERMINAL_RUN_STATUSES = {"completed", "failed", "cancelled", "interrupted"}
@@ -72,6 +74,46 @@ def summarize_reasoning(text: str, max_length: int = 280) -> str:
     return f"{compact[: max_length - 1].rstrip()}…"
 
 
+PROTOCOL_TAG_PATTERN = re.compile(
+    r"<(?P<tag>analysis_summary|final_answer)>\s*(?P<body>.*?)\s*</(?P=tag)>",
+    re.IGNORECASE | re.DOTALL,
+)
+
+
+def parse_protocol_answer_text(text: str) -> tuple[str | None, str | None]:
+    normalized = (text or "").strip()
+    if not normalized:
+        return None, None
+
+    analysis_matches: list[str] = []
+    final_matches: list[str] = []
+    position = 0
+    matched = False
+
+    for match in PROTOCOL_TAG_PATTERN.finditer(normalized):
+        if normalized[position : match.start()].strip():
+            return None, None
+        matched = True
+        position = match.end()
+        body = str(match.group("body") or "").strip()
+        if not body:
+            continue
+        tag_name = str(match.group("tag") or "").lower()
+        if tag_name == "analysis_summary":
+            analysis_matches.append(body)
+        elif tag_name == "final_answer":
+            final_matches.append(body)
+
+    if not matched or normalized[position:].strip() or not final_matches:
+        return None, None
+
+    analysis_summary = "\n\n".join(analysis_matches).strip() or None
+    final_answer = "\n\n".join(final_matches).strip() or None
+    if not final_answer:
+        return None, None
+    return analysis_summary, final_answer
+
+
 def merge_dict(base: dict[str, Any] | None, updates: dict[str, Any]) -> dict[str, Any]:
     merged = dict(base or {})
     for key, value in updates.items():
@@ -92,11 +134,18 @@ def create_run(
     snapshot = loader.get_or_create_snapshot(session, conversation.skill_id)
     now = utcnow()
     assistant_created_at = now + timedelta(microseconds=1)
+    next_sequence_no = get_next_message_sequence_no(session, conversation.id)
+    if next_sequence_no == 1 and is_placeholder_conversation_title(conversation.title):
+        conversation.title = derive_conversation_title_from_prompt(content)
+        conversation.updated_at = now
+        session.add(conversation)
+        session.flush()
 
     user_blocks = [{"type": "text", "text": content}]
     user_message = Message(
         id=new_id("msg"),
         conversation_id=conversation.id,
+        sequence_no=next_sequence_no,
         run_id=None,
         role="user",
         raw_blocks=None,
@@ -127,6 +176,7 @@ def create_run(
     assistant_message = Message(
         id=new_id("msg"),
         conversation_id=conversation.id,
+        sequence_no=next_sequence_no + 1,
         run_id=run.id,
         role="assistant",
         raw_blocks=None,
@@ -177,16 +227,21 @@ def get_conversation_messages(session: Session, conversation_id: str) -> list[Me
         session.scalars(
             select(Message)
             .where(Message.conversation_id == conversation_id)
-            .order_by(Message.created_at.asc(), Message.id.asc())
+            .order_by(Message.sequence_no.asc(), Message.created_at.asc(), Message.id.asc())
         )
     )
+
+
+def get_next_message_sequence_no(session: Session, conversation_id: str) -> int:
+    latest_sequence_no = session.scalar(select(func.max(Message.sequence_no)).where(Message.conversation_id == conversation_id))
+    return int(latest_sequence_no or 0) + 1
 
 
 def get_last_user_prompt(session: Session, conversation_id: str) -> str:
     message = session.scalar(
         select(Message)
         .where(Message.conversation_id == conversation_id, Message.role == "user")
-        .order_by(Message.created_at.desc())
+        .order_by(Message.sequence_no.desc(), Message.created_at.desc(), Message.id.desc())
     )
     if message is None:
         return ""
@@ -242,6 +297,18 @@ def claim_next_run(session: Session) -> Run | None:
     return run
 
 
+def reconcile_inflight_runs(session: Session) -> None:
+    abandoned_runs = list(session.scalars(select(Run).where(Run.status == "running")))
+    for run in abandoned_runs:
+        fail_run(session, run, "failed", "worker_restarted", "Worker restarted while run was still active")
+
+    cancelled_queued_runs = list(
+        session.scalars(select(Run).where(Run.status == "queued", Run.cancel_requested.is_(True)))
+    )
+    for run in cancelled_queued_runs:
+        fail_run(session, run, "cancelled", "cancelled", "Run cancelled before execution")
+
+
 def get_latest_seq(session: Session, run_id: str) -> int:
     latest = session.scalar(select(func.max(RunEvent.seq)).where(RunEvent.run_id == run_id))
     return int(latest or 0)
@@ -278,6 +345,138 @@ def parse_step_index(raw_step_id: str | None, raw_step_index: int | None = None)
 
 def step_identifier(step_index: int, raw_step_id: str | None = None) -> str:
     return raw_step_id or f"step_{step_index}"
+
+
+def append_reasoning_part(
+    session: Session,
+    run: Run,
+    assistant_message: Message,
+    *,
+    seq: int,
+    step_id: str,
+    step_index: int,
+    reasoning_text: str,
+    raw_provider_json: dict[str, Any] | None = None,
+) -> int:
+    summary = reasoning_text.strip()
+    if not summary:
+        return seq
+
+    append_message_block(
+        session,
+        assistant_message,
+        block_type="thinking",
+        payload={
+            "type": "thinking",
+            "thinking": summary,
+            "summary": summary,
+            "stepId": step_id,
+            "stepIndex": step_index,
+        },
+        role="assistant",
+        visibility="internal",
+        step_index=step_index,
+        raw_provider_json=raw_provider_json,
+    )
+    reasoning_id = f"reasoning_{step_index}"
+    seq += 1
+    append_run_event(
+        session,
+        run,
+        seq,
+        {"type": "reasoning-start", "id": reasoning_id, "stepId": step_id, "stepIndex": step_index},
+        raw_provider_json,
+    )
+    for chunk in chunk_text(summary):
+        seq += 1
+        append_run_event(
+            session,
+            run,
+            seq,
+            {
+                "type": "reasoning-delta",
+                "id": reasoning_id,
+                "delta": chunk,
+                "stepId": step_id,
+                "stepIndex": step_index,
+            },
+            raw_provider_json,
+        )
+    seq += 1
+    append_run_event(
+        session,
+        run,
+        seq,
+        {"type": "reasoning-end", "id": reasoning_id, "stepId": step_id, "stepIndex": step_index},
+        raw_provider_json,
+    )
+    return seq
+
+
+def append_text_part(
+    session: Session,
+    run: Run,
+    assistant_message: Message,
+    *,
+    seq: int,
+    step_id: str,
+    step_index: int,
+    text_value: str,
+    raw_provider_json: dict[str, Any] | None = None,
+) -> int:
+    final_text = text_value.strip()
+    if not final_text:
+        return seq
+
+    text_id = f"text_{step_index}"
+    append_message_block(
+        session,
+        assistant_message,
+        block_type="text",
+        payload={
+            "type": "text",
+            "id": text_id,
+            "text": final_text,
+            "stepId": step_id,
+            "stepIndex": step_index,
+        },
+        role="assistant",
+        visibility="user",
+        step_index=step_index,
+        raw_provider_json=raw_provider_json,
+    )
+    seq += 1
+    append_run_event(
+        session,
+        run,
+        seq,
+        {"type": "text-start", "id": text_id, "stepId": step_id, "stepIndex": step_index},
+        raw_provider_json,
+    )
+    for chunk in chunk_text(final_text):
+        seq += 1
+        append_run_event(
+            session,
+            run,
+            seq,
+            {
+                "type": "text-delta",
+                "id": text_id,
+                "delta": chunk,
+                "stepId": step_id,
+                "stepIndex": step_index,
+            },
+            raw_provider_json,
+        )
+    seq += 1
+    append_run_event(
+        session,
+        run,
+        seq,
+        {"type": "text-end", "id": text_id, "stepId": step_id, "stepIndex": step_index},
+        raw_provider_json,
+    )
+    return seq
 
 
 def append_message_block(
@@ -590,57 +789,67 @@ def process_agent_event(session: Session, run: Run, seq: int, raw_event: dict[st
             title=raw_event.get("title"),
             model=raw_event.get("model"),
         )
-        for block in raw_event.get("blocks", []):
-            block_type = block["type"]
-            if block_type == "thinking":
-                summary = summarize_reasoning(str(block.get("thinking") or ""))
-                append_message_block(
-                    session,
-                    assistant_message,
-                    block_type="thinking",
-                    payload={
-                        "type": "thinking",
-                        "thinking": block.get("thinking", ""),
-                        "summary": summary,
-                        "stepId": step_id,
-                        "stepIndex": step_index,
-                    },
-                    role="assistant",
-                    visibility="internal",
-                    step_index=step_index,
-                    raw_provider_json=block,
-                )
-                reasoning_id = f"reasoning_{step_index}"
-                seq += 1
-                append_run_event(
-                    session,
-                    run,
-                    seq,
-                    {"type": "reasoning-start", "id": reasoning_id, "stepId": step_id, "stepIndex": step_index},
-                    block,
-                )
-                for chunk in chunk_text(summary or "思考中..."):
-                    seq += 1
-                    append_run_event(
+        pending_text_blocks: list[dict[str, Any]] = []
+
+        def flush_pending_text_blocks(current_seq: int) -> int:
+            if not pending_text_blocks:
+                return current_seq
+
+            combined_text = "\n".join(str(item.get("text") or "") for item in pending_text_blocks).strip()
+            raw_provider_json = {"blocks": list(pending_text_blocks)}
+            pending_text_blocks.clear()
+            if not combined_text:
+                return current_seq
+
+            analysis_summary, final_answer = parse_protocol_answer_text(combined_text)
+            if final_answer is not None:
+                if analysis_summary:
+                    current_seq = append_reasoning_part(
                         session,
                         run,
-                        seq,
-                        {
-                            "type": "reasoning-delta",
-                            "id": reasoning_id,
-                            "delta": chunk,
-                            "stepId": step_id,
-                            "stepIndex": step_index,
-                        },
-                        block,
+                        assistant_message,
+                        seq=current_seq,
+                        step_id=step_id,
+                        step_index=step_index,
+                        reasoning_text=analysis_summary,
+                        raw_provider_json=raw_provider_json,
                     )
-                seq += 1
-                append_run_event(
+                return append_text_part(
                     session,
                     run,
-                    seq,
-                    {"type": "reasoning-end", "id": reasoning_id, "stepId": step_id, "stepIndex": step_index},
-                    block,
+                    assistant_message,
+                    seq=current_seq,
+                    step_id=step_id,
+                    step_index=step_index,
+                    text_value=final_answer,
+                    raw_provider_json=raw_provider_json,
+                )
+
+            return append_text_part(
+                session,
+                run,
+                assistant_message,
+                seq=current_seq,
+                step_id=step_id,
+                step_index=step_index,
+                text_value=combined_text,
+                raw_provider_json=raw_provider_json,
+            )
+
+        for block in raw_event.get("blocks", []):
+            block_type = block["type"]
+            if block_type != "text":
+                seq = flush_pending_text_blocks(seq)
+            if block_type == "thinking":
+                seq = append_reasoning_part(
+                    session,
+                    run,
+                    assistant_message,
+                    seq=seq,
+                    step_id=step_id,
+                    step_index=step_index,
+                    reasoning_text=str(block.get("thinking") or ""),
+                    raw_provider_json=block,
                 )
             elif block_type == "tool_use":
                 tool_call_id = str(block.get("id") or new_id("toolcall"))
@@ -727,55 +936,8 @@ def process_agent_event(session: Session, run: Run, seq: int, raw_event: dict[st
                     raw_provider_json=block,
                 )
             elif block_type == "text":
-                text_id = f"text_{step_index}"
-                text_value = str(block.get("text") or "")
-                append_message_block(
-                    session,
-                    assistant_message,
-                    block_type="text",
-                    payload={
-                        "type": "text",
-                        "id": text_id,
-                        "text": text_value,
-                        "stepId": step_id,
-                        "stepIndex": step_index,
-                    },
-                    role="assistant",
-                    visibility="user",
-                    step_index=step_index,
-                    raw_provider_json=block,
-                )
-                seq += 1
-                append_run_event(
-                    session,
-                    run,
-                    seq,
-                    {"type": "text-start", "id": text_id, "stepId": step_id, "stepIndex": step_index},
-                    block,
-                )
-                for chunk in chunk_text(text_value):
-                    seq += 1
-                    append_run_event(
-                        session,
-                        run,
-                        seq,
-                        {
-                            "type": "text-delta",
-                            "id": text_id,
-                            "delta": chunk,
-                            "stepId": step_id,
-                            "stepIndex": step_index,
-                        },
-                        block,
-                    )
-                seq += 1
-                append_run_event(
-                    session,
-                    run,
-                    seq,
-                    {"type": "text-end", "id": text_id, "stepId": step_id, "stepIndex": step_index},
-                    block,
-                )
+                pending_text_blocks.append(block)
+        seq = flush_pending_text_blocks(seq)
         return seq
 
     if event_type == "tool-result":
@@ -1255,6 +1417,10 @@ def build_stream_snapshot(session: Session, run: Run) -> dict[str, Any]:
 
 
 def complete_run(session: Session, run: Run, stop_reason: str = "completed") -> None:
+    run.status = stop_reason
+    run.stop_reason = stop_reason
+    run.ended_at = utcnow()
+    run.updated_at = utcnow()
     ui_parts, content_blocks, final_text, trace_summary = build_message_projection(session, run)
     assistant_message = get_assistant_message_for_run(session, run.id)
     if assistant_message is not None:
@@ -1265,10 +1431,6 @@ def complete_run(session: Session, run: Run, stop_reason: str = "completed") -> 
         assistant_message.raw_blocks = None
         assistant_message.status = "completed" if stop_reason == "completed" else stop_reason
         assistant_message.updated_at = utcnow()
-    run.status = stop_reason
-    run.stop_reason = stop_reason
-    run.ended_at = utcnow()
-    run.updated_at = utcnow()
     conversation = session.get(Conversation, run.conversation_id)
     if conversation is not None:
         conversation.status = "idle" if stop_reason == "completed" else stop_reason
@@ -1278,6 +1440,12 @@ def complete_run(session: Session, run: Run, stop_reason: str = "completed") -> 
 
 
 def fail_run(session: Session, run: Run, status: str, error_code: str | None, error_message: str | None) -> None:
+    run.status = status
+    run.error_code = error_code
+    run.error_message = error_message
+    run.stop_reason = status
+    run.ended_at = utcnow()
+    run.updated_at = utcnow()
     ui_parts, content_blocks, final_text, trace_summary = build_message_projection(session, run)
     assistant_message = get_assistant_message_for_run(session, run.id)
     if assistant_message is not None:
@@ -1288,12 +1456,6 @@ def fail_run(session: Session, run: Run, status: str, error_code: str | None, er
         assistant_message.raw_blocks = None
         assistant_message.status = status
         assistant_message.updated_at = utcnow()
-    run.status = status
-    run.error_code = error_code
-    run.error_message = error_message
-    run.stop_reason = status
-    run.ended_at = utcnow()
-    run.updated_at = utcnow()
     conversation = session.get(Conversation, run.conversation_id)
     if conversation is not None:
         conversation.status = "idle" if status == "cancelled" else status

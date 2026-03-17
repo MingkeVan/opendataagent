@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import json
 import os
+import select
 import subprocess
+import time
 from collections.abc import Iterable
 
 from app.core.config import get_settings
@@ -53,11 +55,33 @@ class ClaudeAgentSdkAdapter:
 
     def iter_raw_events(self, process: subprocess.Popen) -> Iterable[dict]:
         assert process.stdout is not None
-        for line in process.stdout:
-            line = line.strip()
-            if not line:
-                continue
-            yield json.loads(line)
+        idle_timeout = max(self.settings.claude_sdk_timeout_seconds, 1)
+        last_activity_at = time.monotonic()
+
+        while True:
+            if process.poll() is not None:
+                for line in process.stdout:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    yield json.loads(line)
+                break
+
+            ready, _, _ = select.select([process.stdout], [], [], 1.0)
+            if ready:
+                line = process.stdout.readline()
+                if line:
+                    last_activity_at = time.monotonic()
+                    line = line.strip()
+                    if not line:
+                        continue
+                    yield json.loads(line)
+                    continue
+
+            if time.monotonic() - last_activity_at >= idle_timeout:
+                self.cancel(process)
+                raise RuntimeError(f"claude agent runtime produced no output for {idle_timeout} seconds")
+
         return_code = process.wait()
         if return_code != 0:
             stderr = process.stderr.read() if process.stderr else ""

@@ -294,6 +294,61 @@ def load_schema_metadata() -> dict:
         "database": settings.agent_data_mysql_database,
         "tables": [tables[name] for name in table_names],
         "relationships": relationships,
+        "semantic_guidance": build_semantic_guidance(),
+    }
+
+
+def build_semantic_guidance() -> dict:
+    return {
+        "business_terms": {
+            "用户": ["customers", "customer_name", "customer_id"],
+            "客户": ["customers", "customer_name", "customer_id"],
+            "订单": ["orders", "order_date", "order_status", "total_amount"],
+            "销售额": ["orders.total_amount", "order_items.line_amount"],
+            "收入": ["orders.total_amount", "order_items.line_amount"],
+            "商品": ["products", "product_name", "category", "product_id"],
+            "品类": ["products.category"],
+            "销量": ["order_items.quantity"],
+        },
+        "table_descriptions": {
+            "customers": "客户主数据表，包含客户名称、城市、注册时间。涉及用户、客户、买家时优先考虑。",
+            "orders": (
+                "订单头表，每行代表一笔订单，包含 customer_id、order_date、order_status、total_amount。"
+                "涉及订单量、订单金额、客户销售额、按天/月趋势时通常以这张表为主。"
+            ),
+            "order_items": (
+                "订单明细表，每行代表订单中的一个商品行，包含 product_id、quantity、line_amount。"
+                "涉及商品销量、商品销售额、品类分析时通常以这张表为主。"
+            ),
+            "products": "商品维度表，包含商品名称、品类、标价。涉及商品、SKU、品类时需要与 order_items 联表。",
+        },
+        "analysis_recipes": [
+            {
+                "question": "按客户统计销售额 / 哪个用户销售额最高",
+                "tables": ["orders", "customers"],
+                "join": "orders.customer_id = customers.id",
+                "metric": "SUM(orders.total_amount)",
+                "grain": "客户",
+            },
+            {
+                "question": "按商品或品类统计销售额",
+                "tables": ["order_items", "products"],
+                "join": "order_items.product_id = products.id",
+                "metric": "SUM(order_items.line_amount)",
+                "grain": "商品 / 品类",
+            },
+            {
+                "question": "按时间看订单量或销售额趋势",
+                "tables": ["orders"],
+                "join": "不需要",
+                "metric": "COUNT(*) / SUM(orders.total_amount)",
+                "grain": "天 / 月",
+            },
+        ],
+        "time_guidance": [
+            "“这个月”默认指当前自然月，从本月第一天 00:00:00 到下月第一天 00:00:00 之前。",
+            "时间过滤优先使用 orders.order_date。",
+        ],
     }
 
 
@@ -311,7 +366,12 @@ def render_schema_context(metadata: dict) -> str:
             if suffix:
                 label += f" ({', '.join(suffix)})"
             column_parts.append(label)
-        lines.append(f"- {table['name']}: " + ", ".join(column_parts))
+        description = metadata.get("semantic_guidance", {}).get("table_descriptions", {}).get(table["name"])
+        if description:
+            lines.append(f"- {table['name']}: " + ", ".join(column_parts))
+            lines.append(f"  meaning: {description}")
+        else:
+            lines.append(f"- {table['name']}: " + ", ".join(column_parts))
     if metadata["relationships"]:
         lines.append("Relationships:")
         for relation in metadata["relationships"]:
@@ -319,6 +379,26 @@ def render_schema_context(metadata: dict) -> str:
                 f"- {relation['table']}.{relation['column']} -> "
                 f"{relation['referenced_table']}.{relation['referenced_column']}"
             )
+    semantic_guidance = metadata.get("semantic_guidance") or {}
+    business_terms = semantic_guidance.get("business_terms") or {}
+    if business_terms:
+        lines.append("Business term mapping:")
+        for term, mappings in business_terms.items():
+            lines.append(f"- {term}: {', '.join(mappings)}")
+    recipes = semantic_guidance.get("analysis_recipes") or []
+    if recipes:
+        lines.append("Common analysis recipes:")
+        for recipe in recipes:
+            lines.append(
+                "- "
+                f"{recipe['question']} -> tables: {', '.join(recipe['tables'])}; "
+                f"join: {recipe['join']}; metric: {recipe['metric']}; grain: {recipe['grain']}"
+            )
+    time_guidance = semantic_guidance.get("time_guidance") or []
+    if time_guidance:
+        lines.append("Time guidance:")
+        for item in time_guidance:
+            lines.append(f"- {item}")
     return "\n".join(lines)
 
 

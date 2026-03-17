@@ -2,7 +2,6 @@ import { computed, onBeforeUnmount, ref } from 'vue'
 import {
   cancelRun,
   createConversation,
-  fetchArtifact,
   fetchConversation,
   fetchConversations,
   fetchMessages,
@@ -13,7 +12,9 @@ import {
 import { applyStreamEvent } from '../lib/stream'
 import { marked } from 'marked'
 import DOMPurify from 'dompurify'
-import { isDataArtifactPart, type Conversation, type Message, type SandboxDetail, type SkillSummary, type StreamEvent, type UiPart } from '../types'
+import { type Conversation, type Message, type SkillSummary, type StreamEvent, type UiPart } from '../types'
+
+const DEFAULT_CONVERSATION_TITLE = '新建会话'
 
 function toErrorMessage(error: unknown, fallback: string): string {
   return error instanceof Error ? error.message : fallback
@@ -45,6 +46,26 @@ function normalizeMessage(message: Message): Message {
   }
 }
 
+function compareMessages(left: Message, right: Message): number {
+  const leftSequence = typeof left.sequenceNo === 'number' ? left.sequenceNo : Number.MAX_SAFE_INTEGER
+  const rightSequence = typeof right.sequenceNo === 'number' ? right.sequenceNo : Number.MAX_SAFE_INTEGER
+  if (leftSequence !== rightSequence) {
+    return leftSequence - rightSequence
+  }
+
+  const leftTime = Date.parse(left.createdAt || '')
+  const rightTime = Date.parse(right.createdAt || '')
+  if (!Number.isNaN(leftTime) && !Number.isNaN(rightTime) && leftTime !== rightTime) {
+    return leftTime - rightTime
+  }
+
+  return left.id.localeCompare(right.id)
+}
+
+function sortMessages(nextMessages: Message[]): Message[] {
+  return [...nextMessages].sort(compareMessages)
+}
+
 export function useChat() {
   const renderMarkdown = (text: string): string => {
     if (!text) {
@@ -63,7 +84,6 @@ export function useChat() {
   const isBootstrapping = ref(false)
   const runStatus = ref('idle')
   const activeRunId = ref<string | null>(null)
-  const selectedDetail = ref<SandboxDetail | null>(null)
   const errorMessage = ref('')
   const streamSeq = ref<Record<string, number>>({})
   let eventSource: EventSource | null = null
@@ -91,7 +111,6 @@ export function useChat() {
     activeRunId.value = null
     runStatus.value = 'idle'
     messages.value = []
-    selectedDetail.value = null
   }
 
   function upsertConversation(conversation: Conversation) {
@@ -102,6 +121,22 @@ export function useChat() {
     }
     conversations.value[index] = conversation
     conversations.value = [...conversations.value]
+  }
+
+  function applyFirstPromptTitle(conversationId: string, prompt: string) {
+    const title = prompt.trim()
+    if (!title) {
+      return
+    }
+    const existing = conversations.value.find((item) => item.id === conversationId)
+    if (!existing || (existing.title && existing.title !== DEFAULT_CONVERSATION_TITLE)) {
+      return
+    }
+    upsertConversation({
+      ...existing,
+      title,
+      updatedAt: new Date().toISOString(),
+    })
   }
 
   function upsertAssistantMessage(runId: string, updater: (message: Message) => void) {
@@ -119,8 +154,9 @@ export function useChat() {
       messages.value.push(message)
     }
     updater(message)
-    message.uiParts = message.uiParts.map((part) => normalizeUiPart(part))
-    messages.value = [...messages.value]
+    const normalized = normalizeMessage(message)
+    Object.assign(message, normalized)
+    messages.value = sortMessages(messages.value)
   }
 
   async function initialize() {
@@ -176,14 +212,13 @@ export function useChat() {
   async function openConversation(conversationId: string) {
     try {
       closeStream()
-      selectedDetail.value = null
       activeConversationId.value = conversationId
       const [conversation, loadedMessages] = await Promise.all([
         fetchConversation(conversationId),
         fetchMessages(conversationId),
       ])
       upsertConversation(conversation)
-      messages.value = loadedMessages.map((message) => normalizeMessage(message))
+      messages.value = sortMessages(loadedMessages.map((message) => normalizeMessage(message)))
       if (conversation.activeRunId) {
         activeRunId.value = conversation.activeRunId
         runStatus.value = conversation.status
@@ -282,6 +317,41 @@ export function useChat() {
     }
   }
 
+  async function startConversationWithPrompt(prompt: string) {
+    const text = prompt.trim()
+    if (!text) {
+      return
+    }
+    if (!selectedSkillId.value) {
+      errorMessage.value = '当前没有可用技能，无法创建会话'
+      return
+    }
+
+    errorMessage.value = ''
+    isSending.value = true
+    try {
+      closeStream()
+      const conversation = await createConversation(selectedSkillId.value)
+      upsertConversation(conversation)
+      activeConversationId.value = conversation.id
+      activeRunId.value = null
+      runStatus.value = 'idle'
+      messages.value = []
+      applyFirstPromptTitle(conversation.id, text)
+
+      const payload = await sendMessage(conversation.id, text)
+      messages.value = sortMessages((await fetchMessages(conversation.id)).map((message) => normalizeMessage(message)))
+      activeRunId.value = payload.runId
+      runStatus.value = payload.status
+      startStream(payload.runId, 0)
+      await loadConversations()
+    } catch (error) {
+      errorMessage.value = toErrorMessage(error, '启动示例问题失败')
+    } finally {
+      isSending.value = false
+    }
+  }
+
   async function handleSend() {
     if (!composer.value.trim()) {
       return
@@ -298,9 +368,10 @@ export function useChat() {
       }
 
       const text = composer.value.trim()
+      applyFirstPromptTitle(conversationId, text)
       composer.value = ''
       const payload = await sendMessage(conversationId, text)
-      messages.value = (await fetchMessages(conversationId)).map((message) => normalizeMessage(message))
+      messages.value = sortMessages((await fetchMessages(conversationId)).map((message) => normalizeMessage(message)))
       activeRunId.value = payload.runId
       runStatus.value = payload.status
       startStream(payload.runId, 0)
@@ -324,48 +395,6 @@ export function useChat() {
     }
   }
 
-  async function inspectPart(part: UiPart) {
-    const normalizedPart = normalizeUiPart(part)
-    selectedDetail.value = {
-      source: normalizedPart,
-      artifact: null,
-      isLoading: false,
-      error: '',
-    }
-
-    if (!isDataArtifactPart(normalizedPart) || !normalizedPart.artifactId) {
-      return
-    }
-
-    selectedDetail.value = {
-      source: normalizedPart,
-      artifact: null,
-      isLoading: true,
-      error: '',
-    }
-
-    try {
-      const artifact = await fetchArtifact(normalizedPart.artifactId)
-      selectedDetail.value = {
-        source: normalizedPart,
-        artifact,
-        isLoading: false,
-        error: '',
-      }
-    } catch (error) {
-      selectedDetail.value = {
-        source: normalizedPart,
-        artifact: null,
-        isLoading: false,
-        error: toErrorMessage(error, '加载 artifact 失败'),
-      }
-    }
-  }
-
-  function clearSelectedDetail() {
-    selectedDetail.value = null
-  }
-
   return {
     skills,
     conversations,
@@ -377,7 +406,6 @@ export function useChat() {
     isBootstrapping,
     runStatus,
     activeRunId,
-    selectedDetail,
     errorMessage,
     streamSeq,
     activeConversation,
@@ -387,10 +415,9 @@ export function useChat() {
     loadConversations,
     openConversation,
     createNewConversation,
+    startConversationWithPrompt,
     handleSend,
     handleCancel,
-    inspectPart,
-    clearSelectedDetail,
     closeStream,
     renderMarkdown,
   }

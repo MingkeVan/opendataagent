@@ -216,12 +216,21 @@ const filteredConversations = computed(() => {
     </aside>
 
     <!-- Main Chat Area -->
-    <main class="main-shell flex min-w-0 flex-1 flex-col bg-[#F5F6F8]">
-      <div class="flex-1 overflow-y-auto px-[40px] pt-8 pb-32 relative">
+    <main class="flex-1 flex flex-col h-screen overflow-hidden relative bg-[#F4F5F7]">
+      <!-- Header -->
+      <header class="flex h-[60px] shrink-0 items-center justify-between px-8 bg-transparent">
+        <div class="flex items-center gap-3">
+          <div class="h-2 w-2 rounded-full bg-[#52C41A] shadow-[0_0_8px_rgba(82,196,26,0.5)]"></div>
+          <span class="text-[14px] font-medium text-[#1F1F1F]">数据库分析引擎已就绪</span>
+        </div>
+      </header>
+
+      <!-- Scrollable Message List -->
+      <div class="flex-1 overflow-y-auto px-[40px] pt-4" ref="scrollContainer">
         <div v-if="isBootstrapping" class="flex h-full items-center justify-center text-[14px] text-[#8C8C8C]">正在加载前后端状态...</div>
         <div v-else-if="!activeConversation" class="empty-state mx-auto flex h-full max-w-[800px] items-center justify-center text-[14px] text-[#8C8C8C]">从左侧会话历史中继续。</div>
 
-        <div v-else class="mx-auto w-full max-w-[860px] space-y-8">
+        <div v-else class="mx-auto w-full max-w-[860px] space-y-8 pb-10">
           <div v-for="message in messages" :key="message.id" class="flex flex-col">
             
             <!-- User Bubble -->
@@ -236,11 +245,8 @@ const filteredConversations = computed(() => {
             <div v-else class="mr-auto w-full max-w-[860px]">
               <div class="bg-white rounded-[18px] p-6 shadow-[0_2px_24px_rgba(0,0,0,0.03)] border border-[#eff1f5]">
                 
-                <div v-for="(part, index) in textParts(message)" :key="`${message.id}-text-${index}`" class="mb-5 last:mb-0" v-show="index === 0">
-                  <div class="markdown-body break-words text-[15px] leading-relaxed text-[#1F1F1F]" v-html="renderMarkdown(String(part.text || ''))"></div>
-                </div>
-
-                <div v-if="thinkingParts(message).length" class="mb-5 mt-2">
+                <!-- Deep Thinking Section (Collapsible) - Moved to top of card -->
+                <div v-if="thinkingParts(message).length" class="mb-5">
                   <details class="group bg-white rounded-xl">
                     <summary class="flex cursor-pointer items-center text-[14px] text-[#595959] select-none list-none w-max font-medium">
                       <span class="mr-1.5 tracking-wide">深度思考</span>
@@ -258,8 +264,8 @@ const filteredConversations = computed(() => {
                     </div>
                   </details>
                 </div>
-                
-                <div v-for="(part, index) in textParts(message)" :key="`${message.id}-text-after-${index}`" class="mb-5 last:mb-0" v-show="index > 0">
+
+                <div v-for="(part, index) in textParts(message)" :key="`${message.id}-text-${index}`" class="mb-5 last:mb-0">
                   <div class="markdown-body break-words text-[15px] leading-relaxed text-[#1F1F1F]" v-html="renderMarkdown(String(part.text || ''))"></div>
                 </div>
 
@@ -294,8 +300,8 @@ const filteredConversations = computed(() => {
       </div>
 
       <!-- Input Area -->
-      <div class="absolute bottom-[28px] left-[300px] right-[40px] z-10 pointer-events-none">
-        <div class="mx-auto w-full max-w-[860px] pointer-events-auto">
+      <div class="px-[40px] pb-[28px] shrink-0">
+        <div class="mx-auto w-full max-w-[860px]">
           <div v-if="errorMessage" class="mb-3 flex items-center gap-2 rounded-lg border border-[#FFCCC7] bg-[#FFF2F0] px-3 py-2 text-[14px] text-[#CF1322] shadow-sm">
             <el-icon><Warning /></el-icon> <span>{{ errorMessage }}</span>
           </div>

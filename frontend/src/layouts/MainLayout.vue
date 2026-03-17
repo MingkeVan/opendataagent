@@ -245,7 +245,7 @@ const filteredConversations = computed(() => {
         <div v-else-if="!activeConversationId || (!messages.length)" class="flex-1 flex flex-col items-center justify-center max-w-[800px] mx-auto w-full animate-in fade-in duration-700">
           <div class="mb-10 text-center">
             <h1 class="text-[36px] font-bold text-[#1F1F1F] mb-3 tracking-tight">我是 OpenDataAgent</h1>
-            <p class="text-[17px] text-[#595959] font-normal">你的企业级双语数据智能分析助手，随时为你回答任何数据难题</p>
+            <p class="text-[17px] text-[#595959] font-normal">你的企业级数据智能分析助手，随时为你回答任何数据难题</p>
           </div>
 
           <div class="w-full relative group">

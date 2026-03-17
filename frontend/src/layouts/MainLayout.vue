@@ -217,13 +217,8 @@ const filteredConversations = computed(() => {
 
     <!-- Main Chat Area -->
     <main class="flex-1 flex flex-col h-screen overflow-hidden relative bg-[#F4F5F7]">
-      <!-- Header -->
-      <header class="flex h-[60px] shrink-0 items-center justify-between px-8 bg-transparent">
-        <div class="flex items-center gap-3">
-          <div class="h-2 w-2 rounded-full bg-[#52C41A] shadow-[0_0_8px_rgba(82,196,26,0.5)]"></div>
-          <span class="text-[14px] font-medium text-[#1F1F1F]">数据库分析引擎已就绪</span>
-        </div>
-      </header>
+      <!-- Header Area -->
+      <header class="flex h-[40px] shrink-0 items-center justify-between px-8 bg-transparent"></header>
 
       <!-- Scrollable Message List -->
       <div class="flex-1 overflow-y-auto px-[40px] pt-4" ref="scrollContainer">

@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import sys
 import tempfile
 import time
@@ -13,19 +14,82 @@ import anyio
 from app.core.config import get_settings
 from app.services.demo_data_service import execute_readonly_query, load_schema_metadata, render_schema_context, seed_demo_schema
 
+PROTOCOL_TAG_PATTERN = re.compile(
+    r"<(?P<tag>analysis_summary|final_answer)>\s*(?P<body>.*?)\s*</(?P=tag)>",
+    re.IGNORECASE | re.DOTALL,
+)
+
 
 def emit(payload: dict) -> None:
     print(json.dumps(payload, ensure_ascii=False), flush=True)
+
+
+def build_protocol_answer(final_answer: str, analysis_summary: str | None = None) -> str:
+    parts: list[str] = []
+    if analysis_summary and analysis_summary.strip():
+        parts.append(f"<analysis_summary>\n{analysis_summary.strip()}\n</analysis_summary>")
+    parts.append(f"<final_answer>\n{final_answer.strip()}\n</final_answer>")
+    return "\n".join(parts)
+
+
+def has_valid_protocol_answer(text: str) -> bool:
+    normalized = (text or "").strip()
+    if not normalized:
+        return False
+
+    final_count = 0
+    position = 0
+    matched = False
+    for match in PROTOCOL_TAG_PATTERN.finditer(normalized):
+        if normalized[position : match.start()].strip():
+            return False
+        matched = True
+        position = match.end()
+        if str(match.group("tag") or "").lower() == "final_answer" and str(match.group("body") or "").strip():
+            final_count += 1
+
+    return matched and not normalized[position:].strip() and final_count > 0
+
+
+def replace_text_blocks(blocks: list[dict[str, Any]], replacement_text: str) -> list[dict[str, Any]]:
+    replaced_blocks: list[dict[str, Any]] = []
+    inserted = False
+    for block in blocks:
+        if block.get("type") == "text":
+            if not inserted:
+                replaced_blocks.append({"type": "text", "text": replacement_text})
+                inserted = True
+            continue
+        replaced_blocks.append(block)
+    if not inserted:
+        replaced_blocks.append({"type": "text", "text": replacement_text})
+    return replaced_blocks
 
 
 def build_system_prompt(schema_context: str, skill_prompt: str) -> str:
     instructions = [
         "你是 OpenDataAgent 的数据分析智能体。",
         "你可以先解释、再调用工具，也可以先调用工具再给结论；不要为了输出 JSON 而牺牲正常 agent 行为。",
-        "你只能通过 mcp__analytics__mysql_query 访问数据库，不能臆测查询结果。",
-        "凡是涉及数据库事实、数量、趋势、排行、明细的问题，都必须至少调用一次 mysql_query。",
+        "你要先把自然语言问题拆成：业务对象、指标、维度、时间范围、排序条件，再映射到 schema。",
+        "当用户没有直接给表名时，要优先依据 schema context 的 business term mapping、table meaning 和 analysis recipes 做语义找表。",
+        "涉及数据库事实、数量、趋势、排行、明细、Top N、时间范围的问题，都必须至少调用一次 mysql_query，不能臆测查询结果。",
+        "你只能通过 mcp__analytics__mysql_query 访问数据库。",
         "只能编写单条只读 MySQL SQL，禁止写操作。",
+        "如果问题是“谁最多/最高/Top 1”，需要在 SQL 中明确排序方向和 LIMIT。",
+        "如果问题涉及“这个月/本月”，默认按当前自然月过滤，优先使用 orders.order_date。",
+        "客户销售额通常使用 orders.total_amount 聚合，并通过 orders.customer_id 关联 customers.id。",
+        "商品或品类销售额通常使用 order_items.line_amount 聚合，并通过 order_items.product_id 关联 products.id。",
+        "在最终回答前，先确认所选表、关联键和指标口径是自洽的；如有歧义，先用更小的验证查询澄清。",
         "最终回答必须使用中文，简洁、结构化，并在有图表或表格时先给业务结论。",
+        "最终回答至少要包含：核心结论、使用的口径/时间范围、关键数据。",
+        "所有最终可见回答必须使用以下 XML 标签格式输出，且标签外不要输出额外正文：",
+        "<analysis_summary>用于简短总结业务对象、指标、维度、时间范围、排序依据、选表依据、口径判断；如果本轮不需要 reasoning，可省略这个标签。</analysis_summary>",
+        "<final_answer>用于输出最终业务结论、关键数字和必要口径说明；这个标签必须始终存在。</final_answer>",
+        "不要在 final_answer 里复述“分析思路”“业务拆解”“口径判断”“步骤说明”这类过程性小标题。",
+        "选表依据、关联键、排序逻辑、业务对象拆解这类过程信息只能放在 analysis_summary，不能放进 final_answer。",
+        "final_answer 必须直接从业务结论起笔，再补关键数字和必要口径说明。",
+        "final_answer 不得出现“尚需查询后确定”“需要先查询”“需进一步确认”这类过程性或不确定性表述。",
+        "输出最终答案前先自检：必须只保留 analysis_summary 和 final_answer 这两个标签，不能缺 final_answer，不能在标签外输出 Markdown 标题、表格说明或额外句子。",
         "以下是可用 schema 上下文：",
         schema_context,
     ]
@@ -129,8 +193,7 @@ def build_fixture_plan(prompt: str, conversation_context: str, schema_metadata: 
                 "dataMode": "fixture",
             },
             "assistantMessages": [
-                build_assistant_message([{"type": "thinking", "thinking": reasoning}], model),
-                build_assistant_message([{"type": "text", "text": answer}], model),
+                build_assistant_message([{"type": "text", "text": build_protocol_answer(answer)}], model),
             ],
             "toolRecords": [],
             "result": {
@@ -162,7 +225,6 @@ def build_fixture_plan(prompt: str, conversation_context: str, schema_metadata: 
                 "dataMode": "fixture",
             },
             "assistantMessages": [
-                build_assistant_message([{"type": "thinking", "thinking": reasoning}], model),
                 build_assistant_message(
                     [{"type": "tool_use", "id": "tool_1", "name": "mysql_query", "input": {"sql": sql}}],
                     model,
@@ -171,7 +233,10 @@ def build_fixture_plan(prompt: str, conversation_context: str, schema_metadata: 
                     [{"type": "tool_result", "tool_use_id": "tool_1", "content": {"rowCount": len(record["rows"])}}],
                     model,
                 ),
-                build_assistant_message([{"type": "text", "text": answer}], model),
+                build_assistant_message(
+                    [{"type": "text", "text": build_protocol_answer(answer, reasoning)}],
+                    model,
+                ),
             ],
             "toolRecords": [record],
             "result": {
@@ -229,7 +294,6 @@ def build_fixture_plan(prompt: str, conversation_context: str, schema_metadata: 
             "dataMode": "fixture",
         },
         "assistantMessages": [
-            build_assistant_message([{"type": "thinking", "thinking": reasoning}], model),
             build_assistant_message(
                 [{"type": "tool_use", "id": "tool_1", "name": "mysql_query", "input": {"sql": sql.strip()}}],
                 model,
@@ -238,7 +302,10 @@ def build_fixture_plan(prompt: str, conversation_context: str, schema_metadata: 
                 [{"type": "tool_result", "tool_use_id": "tool_1", "content": {"rowCount": len(record["rows"])}}],
                 model,
             ),
-            build_assistant_message([{"type": "text", "text": answer}], model),
+            build_assistant_message(
+                [{"type": "text", "text": build_protocol_answer(answer, reasoning)}],
+                model,
+            ),
         ],
         "toolRecords": [record],
         "result": {
@@ -265,7 +332,6 @@ async def run_live_agent(prompt: str, skill_prompt: str, conversation_context: s
         ClaudeAgentOptions,
         ResultMessage,
         TextBlock,
-        ThinkingBlock,
         ToolResultBlock,
         ToolUseBlock,
         create_sdk_mcp_server,
@@ -286,7 +352,8 @@ async def run_live_agent(prompt: str, skill_prompt: str, conversation_context: s
         "mysql_query",
         (
             "Execute exactly one read-only MySQL query against the configured analytics database. "
-            "If querying information_schema.tables, you must filter table_schema to the configured database."
+            "If querying information_schema.tables, you must filter table_schema to the configured database. "
+            "Use this after you have mapped the user's business terms to the correct tables and columns."
         ),
         {"sql": str},
     )
@@ -331,6 +398,57 @@ async def run_live_agent(prompt: str, skill_prompt: str, conversation_context: s
         cache_dir = os.path.join(home_dir, ".cache")
         os.makedirs(config_dir, exist_ok=True)
         os.makedirs(cache_dir, exist_ok=True)
+        runtime_env = {
+            "ANTHROPIC_API_KEY": settings.anthropic_api_key or "",
+            "ANTHROPIC_BASE_URL": settings.anthropic_base_url or "",
+            "HOME": home_dir,
+            "XDG_CONFIG_HOME": config_dir,
+            "XDG_CACHE_HOME": cache_dir,
+            "CI": "1",
+        }
+
+        async def repair_protocol_answer(text: str) -> str | None:
+            if not text.strip():
+                return None
+            repair_options = ClaudeAgentOptions(
+                tools=[],
+                allowed_tools=[],
+                mcp_servers={},
+                system_prompt=(
+                    "你是一个严格的输出格式整理器。"
+                    "请把用户提供的中文业务回答改写成严格的 XML 协议。"
+                    "只能输出可选的 <analysis_summary>...</analysis_summary> 和必需的 "
+                    "<final_answer>...</final_answer>；标签外不能有任何额外文本。"
+                    "不要新增事实，不要删掉核心结论、关键数字和必要口径。"
+                    "业务对象、指标、维度、时间范围、排序依据、选表依据、关联键只能放进 analysis_summary。"
+                    "final_answer 必须直接从最终业务结论起笔，不要先解释用哪些表、字段或关联关系。"
+                    "final_answer 不得出现“尚需查询后确定”“需要先查询”“需进一步确认”这类过程性或不确定性表述。"
+                ),
+                model=settings.anthropic_model,
+                max_turns=1,
+                cwd=str(settings.repo_root),
+                cli_path=settings.claude_cli_path,
+                env=runtime_env,
+                permission_mode="bypassPermissions",
+                setting_sources=[],
+            )
+            repaired_chunks: list[str] = []
+            with anyio.fail_after(min(settings.claude_sdk_timeout_seconds, 45)):
+                async for repair_message in query(
+                    prompt=(
+                        "请把下面这段回答重写为严格 XML 协议格式：\n"
+                        "<raw_answer>\n"
+                        f"{text.strip()}\n"
+                        "</raw_answer>"
+                    ),
+                    options=repair_options,
+                ):
+                    if isinstance(repair_message, AssistantMessage):
+                        for repair_block in repair_message.content:
+                            if isinstance(repair_block, TextBlock):
+                                repaired_chunks.append(repair_block.text)
+            repaired_text = "\n".join(chunk.strip() for chunk in repaired_chunks if chunk.strip()).strip()
+            return repaired_text if has_valid_protocol_answer(repaired_text) else None
 
         options = ClaudeAgentOptions(
             tools=[],
@@ -341,17 +459,9 @@ async def run_live_agent(prompt: str, skill_prompt: str, conversation_context: s
             max_turns=8,
             cwd=str(settings.repo_root),
             cli_path=settings.claude_cli_path,
-            env={
-                "ANTHROPIC_API_KEY": settings.anthropic_api_key or "",
-                "ANTHROPIC_BASE_URL": settings.anthropic_base_url or "",
-                "HOME": home_dir,
-                "XDG_CONFIG_HOME": config_dir,
-                "XDG_CACHE_HOME": cache_dir,
-                "CI": "1",
-            },
+            env=runtime_env,
             permission_mode="bypassPermissions",
             setting_sources=[],
-            effort="high",
         )
 
         assistant_messages: list[dict[str, Any]] = []
@@ -361,9 +471,7 @@ async def run_live_agent(prompt: str, skill_prompt: str, conversation_context: s
                 if isinstance(message, AssistantMessage):
                     payload = build_assistant_message([], settings.anthropic_model)
                     for block in message.content:
-                        if isinstance(block, ThinkingBlock):
-                            payload["blocks"].append({"type": "thinking", "thinking": block.thinking})
-                        elif isinstance(block, ToolUseBlock):
+                        if isinstance(block, ToolUseBlock):
                             payload["blocks"].append(
                                 {
                                     "type": "tool_use",
@@ -393,6 +501,17 @@ async def run_live_agent(prompt: str, skill_prompt: str, conversation_context: s
                         "model": settings.anthropic_model,
                     }
 
+        for assistant_message in assistant_messages:
+            text_blocks = [block for block in assistant_message["blocks"] if block.get("type") == "text"]
+            if not text_blocks:
+                continue
+            combined_text = "\n".join(str(block.get("text") or "") for block in text_blocks).strip()
+            if has_valid_protocol_answer(combined_text):
+                continue
+            repaired_text = await repair_protocol_answer(combined_text)
+            if repaired_text:
+                assistant_message["blocks"] = replace_text_blocks(assistant_message["blocks"], repaired_text)
+
     return {
         "context": {
             "provider": "claude-agent-sdk",
@@ -418,18 +537,7 @@ async def run_agent(prompt: str, skill_prompt: str, conversation_context: str) -
 
 def emit_payload(payload: dict[str, Any]) -> None:
     settings = get_settings()
-    emit({"type": "run-context", "context": payload["context"]})
     delay = settings.claude_agent_fixture_delay_ms / 1000 if settings.claude_agent_use_fixture_data else 0
-
-    emit(
-        {
-            "type": "step-start",
-            "stepId": "step_1",
-            "stepIndex": 1,
-            "title": "通过 Claude Agent SDK 分析并查询数据库",
-            "model": payload["context"]["model"],
-        }
-    )
     if delay:
         time.sleep(delay)
 
@@ -509,6 +617,26 @@ def main() -> int:
     del args.run_id, args.skill_id, args.conversation_title
     skill_prompt = os.getenv("AGENT_SKILL_PROMPT", "").strip()
     conversation_context = os.getenv("AGENT_CONVERSATION_CONTEXT", "").strip()
+    settings = get_settings()
+    emit(
+        {
+            "type": "run-context",
+            "context": {
+                "provider": "claude-agent-sdk",
+                "model": settings.anthropic_model,
+                "dataMode": "fixture" if settings.claude_agent_use_fixture_data else "live",
+            },
+        }
+    )
+    emit(
+        {
+            "type": "step-start",
+            "stepId": "step_1",
+            "stepIndex": 1,
+            "title": "通过 Claude Agent SDK 分析并查询数据库",
+            "model": settings.anthropic_model,
+        }
+    )
     payload = anyio.run(run_agent, args.prompt, skill_prompt, conversation_context)
     emit_payload(payload)
     return 0

@@ -42,6 +42,7 @@ class MessageCreateRequest(BaseModel):
 class MessageResponse(BaseModel):
     id: str
     conversationId: str
+    sequenceNo: Optional[int] = None
     runId: Optional[str]
     role: str
     uiParts: List[Dict[str, Any]]

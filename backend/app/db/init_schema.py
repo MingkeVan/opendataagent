@@ -44,6 +44,7 @@ def reset_schema() -> None:
 def ensure_additive_schema() -> None:
     engine = get_engine()
     inspector = inspect(engine)
+    inspector = inspect(engine)
     table_columns = {table_name: {column["name"] for column in inspector.get_columns(table_name)} for table_name in inspector.get_table_names()}
     statements: list[str] = []
 
@@ -55,6 +56,8 @@ def ensure_additive_schema() -> None:
             statements.append("ALTER TABLE messages ADD COLUMN trace_summary JSON NULL")
         if "final_text" not in missing:
             statements.append("ALTER TABLE messages ADD COLUMN final_text TEXT NULL")
+        if "sequence_no" not in missing:
+            statements.append("ALTER TABLE messages ADD COLUMN sequence_no INT NULL")
 
     if "runs" in table_columns and "context_json" not in table_columns["runs"]:
         statements.append("ALTER TABLE runs ADD COLUMN context_json JSON NULL")
@@ -66,3 +69,26 @@ def ensure_additive_schema() -> None:
         with engine.begin() as conn:
             for statement in statements:
                 conn.execute(text(statement))
+
+    table_columns = {table_name: {column["name"] for column in inspector.get_columns(table_name)} for table_name in inspector.get_table_names()}
+    if "messages" in table_columns and "sequence_no" in table_columns["messages"]:
+        with engine.begin() as conn:
+            conn.execute(
+                text(
+                    """
+                    UPDATE messages AS target
+                    JOIN (
+                        SELECT
+                            id,
+                            ROW_NUMBER() OVER (
+                                PARTITION BY conversation_id
+                                ORDER BY created_at ASC, id ASC
+                            ) AS derived_sequence_no
+                        FROM messages
+                    ) AS ordered
+                    ON ordered.id = target.id
+                    SET target.sequence_no = ordered.derived_sequence_no
+                    WHERE target.sequence_no IS NULL
+                    """
+                )
+            )

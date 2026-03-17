@@ -1,6 +1,6 @@
 <script setup lang="ts">
-import { Connection, DataBoard, Document, Loading, Plus, RefreshRight, Warning } from '@element-plus/icons-vue'
-import { computed, onMounted } from 'vue'
+import { CollectionTag, EditPen, Loading, Promotion, RefreshRight, Search, Warning } from '@element-plus/icons-vue'
+import { computed, onMounted, ref } from 'vue'
 import { use } from 'echarts/core'
 import { BarChart, LineChart } from 'echarts/charts'
 import { GridComponent, LegendComponent, TooltipComponent } from 'echarts/components'
@@ -32,31 +32,31 @@ const {
   isBootstrapping,
   runStatus,
   activeRunId,
-  selectedDetail,
   errorMessage,
   activeConversation,
-  apiBase,
   initialize,
   loadConversations,
   openConversation,
   createNewConversation,
+  startConversationWithPrompt,
   handleSend,
   handleCancel,
-  inspectPart,
-  clearSelectedDetail,
   renderMarkdown,
 } = chat
 
+const starterQuestions = [
+  '这个月哪个用户产生的销售额最多？',
+  '最近30天订单数量趋势',
+  '按品类看本月销售额 Top 5',
+  '数据库里有几个表？',
+]
+
+const UTC_PLUS_8_OFFSET_MS = 8 * 60 * 60 * 1000
+const relativeTimeFormatter = new Intl.RelativeTimeFormat('zh-CN', { numeric: 'auto' })
+const conversationSearch = ref('')
+
 onMounted(async () => {
   await initialize()
-})
-
-const sandboxContent = computed<UiPart | null>(() => {
-  const contentJson = selectedDetail.value?.artifact?.contentJson
-  if (contentJson && typeof contentJson === 'object' && 'type' in contentJson) {
-    return contentJson as UiPart
-  }
-  return selectedDetail.value?.source ?? null
 })
 
 function formatTime(isoString: string) {
@@ -71,18 +71,55 @@ function formatTime(isoString: string) {
   }).format(new Date(isoString))
 }
 
-function formatDateTime(isoString?: string) {
+function parseServerUtcIso(isoString: string) {
   if (!isoString) {
+    return null
+  }
+  const normalized = /z|[+-]\d{2}:\d{2}$/i.test(isoString) ? isoString : `${isoString}Z`
+  const parsed = new Date(normalized)
+  return Number.isNaN(parsed.getTime()) ? null : parsed
+}
+
+function formatRelativeTimeUtc8(isoString: string) {
+  const parsed = parseServerUtcIso(isoString)
+  if (!parsed) {
     return ''
   }
-  return new Intl.DateTimeFormat('zh-CN', {
-    month: '2-digit',
-    day: '2-digit',
-    hour: '2-digit',
-    minute: '2-digit',
-    second: '2-digit',
-    hour12: false,
-  }).format(new Date(isoString))
+
+  const nowUtc8 = Date.now() + UTC_PLUS_8_OFFSET_MS
+  const targetUtc8 = parsed.getTime() + UTC_PLUS_8_OFFSET_MS
+  const diffMs = targetUtc8 - nowUtc8
+  const diffMinutes = Math.round(diffMs / 60000)
+
+  if (Math.abs(diffMinutes) < 1) {
+    return '刚刚'
+  }
+  if (Math.abs(diffMinutes) < 60) {
+    return relativeTimeFormatter.format(diffMinutes, 'minute')
+  }
+
+  const diffHours = Math.round(diffMinutes / 60)
+  if (Math.abs(diffHours) < 24) {
+    return relativeTimeFormatter.format(diffHours, 'hour')
+  }
+
+  const diffDays = Math.round(diffHours / 24)
+  if (Math.abs(diffDays) < 7) {
+    return relativeTimeFormatter.format(diffDays, 'day')
+  }
+
+  const diffWeeks = Math.round(diffDays / 7)
+  if (Math.abs(diffWeeks) < 5) {
+    return relativeTimeFormatter.format(diffWeeks, 'week')
+  }
+
+  const diffMonths = Math.round(diffDays / 30)
+  if (Math.abs(diffMonths) < 12) {
+    return relativeTimeFormatter.format(diffMonths, 'month')
+  }
+
+  const diffYears = Math.round(diffDays / 365)
+  return relativeTimeFormatter.format(diffYears, 'year')
 }
 
 function textParts(message: Message) {
@@ -95,10 +132,16 @@ function thinkingParts(message: Message) {
   )
 }
 
-function artifactCards(message: Message) {
-  return message.uiParts.filter(
-    (part) => isDataChartPart(part) || isDataTablePart(part) || isDataArtifactPart(part),
-  )
+function chartParts(message: Message) {
+  return message.uiParts.filter((part) => isDataChartPart(part))
+}
+
+function tableParts(message: Message) {
+  return message.uiParts.filter((part) => isDataTablePart(part))
+}
+
+function artifactParts(message: Message) {
+  return message.uiParts.filter((part) => isDataArtifactPart(part))
 }
 
 function toolInputPreview(part: UiPart) {
@@ -121,16 +164,16 @@ function toolOutputPreview(part: UiPart) {
   return 'Pending...'
 }
 
-function tableColumns(part: UiPart | null): string[] {
-  if (!Array.isArray(part?.columns)) {
+function tableColumns(part: UiPart): string[] {
+  if (!Array.isArray(part.columns)) {
     return []
   }
   return part.columns.filter((column): column is string => typeof column === 'string')
 }
 
-function tableRows(part: UiPart | null): Record<string, unknown>[] {
+function tableRows(part: UiPart): Record<string, unknown>[] {
   const columns = tableColumns(part)
-  const rows = Array.isArray(part?.rows) ? part.rows : []
+  const rows = Array.isArray(part.rows) ? part.rows : []
   return rows.map((row, index) => {
     if (Array.isArray(row)) {
       const mapped = columns.reduce<Record<string, unknown>>((acc, column, columnIndex) => {
@@ -146,8 +189,8 @@ function tableRows(part: UiPart | null): Record<string, unknown>[] {
   })
 }
 
-function chartOption(part: UiPart | null): Record<string, unknown> {
-  return part?.spec && typeof part.spec === 'object' ? (part.spec as Record<string, unknown>) : {}
+function chartOption(part: UiPart): Record<string, unknown> {
+  return part.spec && typeof part.spec === 'object' ? (part.spec as Record<string, unknown>) : {}
 }
 
 function dataCardTitle(part: UiPart) {
@@ -186,103 +229,149 @@ function toolStateClass(state?: string) {
   }
 }
 
-function sandboxPayload() {
-  if (!selectedDetail.value) {
+function isPlaceholderConversationTitle(title?: string) {
+  const normalized = String(title || '').trim()
+  return !normalized || normalized === '新建会话'
+}
+
+function conversationListTitle(conversation: { title: string }) {
+  return isPlaceholderConversationTitle(conversation.title) ? '未开始提问' : conversation.title
+}
+
+function currentConversationTitle() {
+  if (!activeConversation.value || isPlaceholderConversationTitle(activeConversation.value.title)) {
     return ''
   }
-  return JSON.stringify(selectedDetail.value.artifact ?? selectedDetail.value.source, null, 2)
+  return activeConversation.value.title
 }
+
+const filteredConversations = computed(() => {
+  const keyword = conversationSearch.value.trim().toLowerCase()
+  if (!keyword) {
+    return conversations.value
+  }
+  return conversations.value.filter((conversation) => conversationListTitle(conversation).toLowerCase().includes(keyword))
+})
+
+const selectedSkillLabel = computed(() => {
+  const skill = skills.value.find((item) => item.id === selectedSkillId.value)
+  return skill ? `${skill.name} · ${skill.version}` : '未选择 Skill'
+})
 </script>
 
 <template>
-  <div class="style-f-root flex h-screen min-w-[1200px] overflow-hidden bg-[#FAFAFA] font-['IBM_Plex_Sans','PingFang_SC','Hiragino_Sans_GB',sans-serif] text-[#1F1F1F]">
-    <aside class="flex w-64 shrink-0 flex-col border-r border-[#D9D9D9] bg-[#FAFAFA]">
-      <div class="flex h-12 shrink-0 items-center justify-between border-b border-[#D9D9D9] px-3">
-        <div>
-          <div class="text-[11px] font-semibold uppercase tracking-[0.18em] text-[#595959]">Explorer</div>
-          <div class="text-[10px] text-[#8C8C8C]">{{ conversations.length }} Conversations</div>
+  <div class="style-f-root flex h-screen min-w-[1100px] overflow-hidden bg-transparent font-['IBM_Plex_Sans','PingFang_SC','Hiragino_Sans_GB',sans-serif] text-[#1F1F1F]">
+    <aside class="sidebar-shell flex w-72 shrink-0 flex-col bg-[rgba(255,255,255,0.72)]">
+      <div class="px-4 py-4">
+        <div class="mb-3 flex items-center gap-2 text-[11px] font-semibold uppercase tracking-[0.16em] text-[#667085]">
+          <el-icon :size="13"><CollectionTag /></el-icon>
+          <span>Skill市场</span>
         </div>
-        <div class="flex items-center gap-1">
-          <button
-            class="flex h-7 w-7 items-center justify-center border border-[#D9D9D9] bg-white text-[#595959] transition-colors hover:border-[#1677FF] hover:text-[#1677FF]"
-            title="刷新会话"
-            @click="loadConversations()"
-          >
-            <el-icon :size="14"><RefreshRight /></el-icon>
-          </button>
-          <button
-            class="flex h-7 w-7 items-center justify-center border border-[#1677FF] bg-[#1677FF] text-white transition-colors hover:bg-[#4096FF]"
-            title="新建会话"
-            @click="createNewConversation()"
-          >
-            <el-icon :size="14"><Plus /></el-icon>
-          </button>
-        </div>
-      </div>
-
-      <div class="border-b border-[#D9D9D9] px-3 py-3">
-        <div class="mb-1 text-[11px] font-semibold uppercase tracking-[0.18em] text-[#595959]">Skill</div>
-        <select
+        <div class="mb-3 truncate px-3.5 text-sm font-medium text-[#344054]">{{ selectedSkillLabel }}</div>
+        <el-select
           v-model="selectedSkillId"
-          class="h-9 w-full border border-[#D9D9D9] bg-white px-2 text-sm text-[#1F1F1F] outline-none transition-colors hover:border-[#1677FF] focus:border-[#1677FF]"
+          class="skill-select w-full"
+          placeholder="选择 Skill"
+          :disabled="!skills.length"
+          :teleported="false"
         >
-          <option v-if="!skills.length" value="">暂无可用 Skill</option>
-          <option v-for="skill in skills" :key="skill.id" :value="skill.id">
+          <el-option
+            v-for="skill in skills"
+            :key="skill.id"
+            :value="skill.id"
+            :label="`${skill.name} · ${skill.version}`"
+          >
             {{ skill.name }} · {{ skill.version }}
-          </option>
-        </select>
+          </el-option>
+        </el-select>
       </div>
 
-      <div class="flex-1 overflow-y-auto p-1">
+      <div class="px-4 py-3">
+        <div class="mb-2 flex items-center justify-between">
+          <div class="text-[11px] font-semibold uppercase tracking-[0.16em] text-[#667085]">会话历史</div>
+          <div class="flex items-center gap-2">
+            <div class="text-[11px] text-[#98A2B3]">{{ filteredConversations.length }}</div>
+            <button
+              class="secondary-action flex h-8 w-8 items-center justify-center rounded-lg bg-transparent text-[#98A2B3] transition-colors hover:bg-[#EEF4FF] hover:text-[#1677FF]"
+              title="刷新会话"
+              @click="loadConversations()"
+            >
+              <el-icon :size="14"><RefreshRight /></el-icon>
+            </button>
+          </div>
+        </div>
+        <button
+          class="sidebar-primary-action mb-3 flex h-10 w-10 items-center justify-center rounded-full bg-[#EEF4FF] text-[#1677FF] transition-colors hover:bg-[#E0ECFF]"
+          title="新增会话"
+          @click="createNewConversation()"
+        >
+          <el-icon :size="16"><EditPen /></el-icon>
+        </button>
+        <div class="relative">
+          <el-icon class="pointer-events-none absolute left-3 top-1/2 -translate-y-1/2 text-[#98A2B3]"><Search /></el-icon>
+          <input
+            v-model="conversationSearch"
+            class="sidebar-search h-10 w-full rounded-lg border-0 bg-[#F1F4F8] pl-9 pr-3 text-sm text-[#344054] outline-none transition-colors placeholder:text-[#98A2B3] focus:bg-[#EAF2FF]"
+            placeholder="搜索会话标题"
+          />
+        </div>
+      </div>
+
+      <div class="flex-1 overflow-y-auto p-3">
         <div
           v-if="!conversations.length && !isBootstrapping"
-          class="px-3 py-4 text-sm text-[#8C8C8C]"
+          class="empty-state rounded-xl border border-dashed border-[#D8E0EA] bg-white px-4 py-5 text-sm text-[#8C8C8C]"
         >
           还没有会话记录。
         </div>
 
+        <div
+          v-else-if="!filteredConversations.length"
+          class="empty-state rounded-xl border border-dashed border-[#D8E0EA] bg-white px-4 py-5 text-sm text-[#8C8C8C]"
+        >
+          没有匹配的会话。
+        </div>
+
         <button
-          v-for="conversation in conversations"
+          v-for="conversation in filteredConversations"
           :key="conversation.id"
-          class="mb-1 flex w-full flex-col border px-3 py-2 text-left transition-colors"
+          class="history-item mb-1.5 flex w-full min-w-0 items-center justify-between gap-3 rounded-xl px-3.5 py-3 text-left transition-colors"
           :class="
             activeConversationId === conversation.id
-              ? 'border-[#1677FF] bg-[#E6F4FF]'
-              : 'border-transparent bg-transparent hover:border-[#D9D9D9] hover:bg-white'
+              ? 'bg-[#EEF5FF]'
+              : 'bg-transparent hover:bg-[#F8FAFD]'
           "
           @click="openConversation(conversation.id)"
         >
-          <div class="truncate text-sm font-medium text-[#1F1F1F]">{{ conversation.title }}</div>
-          <div class="mt-1 flex items-center justify-between text-[11px] text-[#8C8C8C]">
-            <span>{{ conversation.status }}</span>
-            <span>{{ formatTime(conversation.updatedAt) }}</span>
+          <div class="min-w-0 flex-1 truncate text-sm font-medium text-[#1F1F1F]">
+            {{ conversationListTitle(conversation) }}
           </div>
+          <span class="shrink-0 text-[11px] text-[#8C8C8C]">
+            {{ formatRelativeTimeUtc8(conversation.updatedAt) }}
+          </span>
         </button>
       </div>
     </aside>
 
-    <main class="flex min-w-0 flex-1 flex-col border-r border-[#D9D9D9] bg-white">
-      <header class="flex h-12 shrink-0 items-center justify-between border-b border-[#D9D9D9] bg-[#FAFAFA] px-4">
+    <main class="main-shell flex min-w-0 flex-1 flex-col bg-[#F7F8FA]">
+      <header class="topbar flex h-14 shrink-0 items-center justify-between border-b border-[#E5EAF1] bg-[#F7F8FA] px-5">
         <div class="flex min-w-0 items-center gap-3">
           <div class="flex items-center gap-2">
-            <div class="h-3 w-3 bg-[#1677FF]"></div>
+            <div class="h-3.5 w-3.5 rounded-md bg-[#1677FF]"></div>
             <span class="text-sm font-semibold tracking-[0.08em] text-[#1F1F1F]">OpenDataAgent</span>
           </div>
-          <div class="h-4 w-px bg-[#D9D9D9]"></div>
-          <div class="truncate text-xs text-[#595959]">
-            {{ activeConversation?.title || '未选中会话' }}
-          </div>
+          <template v-if="currentConversationTitle()">
+            <div class="h-4 w-px bg-[#D9D9D9]"></div>
+            <div class="truncate text-xs text-[#595959]">
+              {{ currentConversationTitle() }}
+            </div>
+          </template>
         </div>
 
         <div class="flex items-center gap-3 text-xs">
-          <div class="hidden items-center gap-2 text-[#595959] md:flex">
-            <el-icon><Connection /></el-icon>
-            <span class="font-mono">{{ apiBase }}</span>
-          </div>
-
           <div
-            class="flex items-center gap-2 border px-2 py-1"
-            :class="activeRunId ? 'border-[#91Caff] bg-[#E6F4FF] text-[#0958D9]' : 'border-[#D9D9D9] bg-white text-[#595959]'"
+            class="flex items-center gap-2 rounded-full border px-3 py-1.5"
+            :class="activeRunId ? 'border-[#B8D2F8] bg-[#EDF4FF] text-[#175CD3]' : 'border-[#D7DFEA] bg-white text-[#667085]'"
           >
             <el-icon v-if="activeRunId" class="is-loading"><Loading /></el-icon>
             <span>{{ runStatus }}</span>
@@ -290,7 +379,7 @@ function sandboxPayload() {
 
           <button
             v-if="activeRunId"
-            class="flex h-8 items-center justify-center border border-[#FF4D4F] bg-white px-3 text-[#CF1322] transition-colors hover:bg-[#FFF1F0]"
+            class="flex h-9 items-center justify-center rounded-lg border border-[#F4C7C7] bg-white px-3 text-[#C24141] transition-colors hover:bg-[#FFF4F3]"
             @click="handleCancel()"
           >
             Stop Run
@@ -298,49 +387,75 @@ function sandboxPayload() {
         </div>
       </header>
 
-      <div class="flex-1 overflow-y-auto p-5">
+      <div class="flex-1 overflow-y-auto p-8">
         <div v-if="isBootstrapping" class="flex h-full items-center justify-center text-sm text-[#8C8C8C]">
           正在加载前后端状态...
         </div>
 
         <div
           v-else-if="!activeConversation"
-          class="flex h-full items-center justify-center border border-dashed border-[#D9D9D9] bg-[#FAFAFA] text-sm text-[#8C8C8C]"
+          class="empty-state flex h-full items-center justify-center rounded-2xl border border-dashed border-[#D8E0EA] bg-white text-sm text-[#8C8C8C]"
         >
-          请选择会话，或直接新建一个会话开始执行。
+          <div class="mx-auto max-w-[640px] space-y-4 px-6 text-center">
+            <div>从左侧会话历史中继续，或直接选择一个示例问题开始。</div>
+            <div class="grid gap-2 text-left sm:grid-cols-2">
+              <button
+                v-for="question in starterQuestions"
+                :key="`empty-${question}`"
+                class="starter-button rounded-lg border border-[#DDE4EE] bg-white px-3 py-3 text-sm leading-6 text-[#434343] transition-colors hover:border-[#A9C4F5] hover:bg-[#F7FAFF]"
+                :disabled="isSending || !!activeRunId"
+                @click="startConversationWithPrompt(question)"
+              >
+                {{ question }}
+              </button>
+            </div>
+          </div>
         </div>
 
         <div
           v-else-if="!messages.length"
-          class="flex h-full items-center justify-center border border-dashed border-[#D9D9D9] bg-[#FAFAFA] text-sm text-[#8C8C8C]"
+          class="empty-state flex h-full items-center justify-center rounded-2xl border border-dashed border-[#D8E0EA] bg-white text-sm text-[#8C8C8C]"
         >
-          当前会话还没有消息，发送问题后将通过 SSE 实时流式返回。
+          <div class="mx-auto max-w-[640px] space-y-4 px-6 text-center">
+            <div>当前会话还没有消息。你可以直接输入问题，或从下面任选一个示例开始。</div>
+            <div class="grid gap-2 text-left sm:grid-cols-2">
+              <button
+                v-for="question in starterQuestions"
+                :key="`idle-${question}`"
+                class="starter-button rounded-lg border border-[#DDE4EE] bg-white px-3 py-3 text-sm leading-6 text-[#434343] transition-colors hover:border-[#A9C4F5] hover:bg-[#F7FAFF]"
+                :disabled="isSending || !!activeRunId"
+                @click="startConversationWithPrompt(question)"
+              >
+                {{ question }}
+              </button>
+            </div>
+          </div>
         </div>
 
-        <div v-else class="space-y-7">
+        <div v-else class="mx-auto w-full max-w-[980px] space-y-10">
           <div v-for="message in messages" :key="message.id" class="flex flex-col">
-            <div v-if="message.role === 'user'" class="ml-auto flex max-w-[85%] min-w-[240px] flex-col items-end">
+            <div v-if="message.role === 'user'" class="ml-auto flex max-w-[82%] min-w-[240px] flex-col items-end">
               <div class="mb-1 text-[10px] uppercase tracking-[0.2em] text-[#1D39C4]">
                 User · {{ formatTime(message.createdAt) }}
               </div>
-              <div class="user-bubble border border-[#BFDBFE] bg-[#EFF6FF] px-4 py-3 text-sm text-[#1D39C4]">
+              <div class="user-bubble border border-[#CFE0FF] bg-[#EEF4FF] px-4 py-3 text-sm text-[#1D39C4]">
                 <div
                   v-for="(part, index) in textParts(message)"
                   :key="`${message.id}-user-${index}`"
-                  class="markdown-body whitespace-pre-wrap leading-7"
+                  class="markdown-body break-words leading-6"
                   v-html="renderMarkdown(String(part.text || ''))"
                 ></div>
               </div>
             </div>
 
-            <div v-else class="mr-auto w-full max-w-[90%]">
-              <div class="mb-2 flex items-center justify-between border-b border-[#E8E8E8] pb-2 text-[10px] uppercase tracking-[0.2em] text-[#8C8C8C]">
+            <div v-else class="mr-auto w-full max-w-[860px]">
+              <div class="mb-3 flex items-center justify-between border-b border-[#E6EBF2] pb-2 text-[10px] uppercase tracking-[0.2em] text-[#8C8C8C]">
                 <span class="font-semibold text-[#389E0D]">Agent</span>
                 <span>{{ formatTime(message.createdAt) }}</span>
               </div>
 
               <div v-if="thinkingParts(message).length" class="mb-4">
-                <details class="group border border-[#E8E8E8] bg-[#FAFAFA]">
+                <details class="surface-card group rounded-xl border border-[#E1E7EF] bg-white">
                   <summary class="flex cursor-pointer items-center justify-between px-3 py-2 text-xs text-[#595959]">
                     <span>
                       <span class="mr-2 inline-block transition-transform group-open:rotate-90">▶</span>
@@ -353,35 +468,36 @@ function sandboxPayload() {
                     <template v-for="(part, index) in thinkingParts(message)" :key="`${message.id}-thinking-${index}`">
                       <div
                         v-if="part.type === 'step'"
-                        class="mb-3 flex items-center justify-between border border-[#D9D9D9] bg-white px-3 py-2 text-xs"
+                        class="mb-3 flex items-center justify-between rounded-lg border border-[#E1E7EF] bg-[#FBFCFE] px-3 py-2 text-xs"
                       >
                         <div>
                           <div class="font-semibold text-[#1F1F1F]">{{ part.title || '执行步骤' }}</div>
                           <div class="mt-1 text-[#8C8C8C]">{{ part.stepId }}</div>
                         </div>
-                        <span class="border border-[#D9D9D9] px-2 py-1 text-[#595959]">{{ part.status }}</span>
+                        <span class="rounded-sm border border-[#D9D9D9] px-2 py-1 text-[#595959]">{{ part.status }}</span>
                       </div>
 
                       <div
                         v-else-if="isReasoningPart(part)"
-                        class="mb-3 border-l-2 border-[#1677FF] bg-white px-3 py-2"
+                        class="mb-3 rounded-lg border border-[#DFE7F1] bg-[#FBFCFE] px-3 py-3"
                       >
                         <div class="mb-1 text-[11px] font-semibold uppercase tracking-[0.18em] text-[#595959]">Reasoning</div>
-                        <div class="text-sm leading-6 text-[#434343]">
-                          {{ part.summary || part.content || '...' }}
-                        </div>
+                        <div
+                          class="markdown-body break-words text-sm leading-6 text-[#434343]"
+                          v-html="renderMarkdown(String(part.summary || part.content || '...'))"
+                        ></div>
                       </div>
 
                       <div
                         v-else-if="isToolCallPart(part)"
-                        class="mb-3 border border-[#D9D9D9] bg-white p-3"
+                        class="surface-card mb-3 rounded-xl border border-[#E1E7EF] bg-white p-3"
                       >
                         <div class="mb-3 flex items-center justify-between gap-3">
                           <div class="min-w-0">
                             <div class="truncate font-mono text-xs text-[#1F1F1F]">{{ part.toolName }}()</div>
                             <div class="mt-1 text-[11px] text-[#8C8C8C]">{{ part.id }}</div>
                           </div>
-                          <span class="border px-2 py-1 text-[11px]" :class="toolStateClass(part.state)">
+                          <span class="rounded-sm border px-2 py-1 text-[11px]" :class="toolStateClass(part.state)">
                             {{ part.state }}
                           </span>
                         </div>
@@ -389,18 +505,12 @@ function sandboxPayload() {
                         <div class="grid gap-3 lg:grid-cols-2">
                           <div>
                             <div class="mb-1 text-[11px] font-semibold uppercase tracking-[0.18em] text-[#8C8C8C]">Input</div>
-                            <pre class="overflow-x-auto border border-[#E8E8E8] bg-[#FAFAFA] p-2 text-[11px] leading-5 text-[#434343]">{{ toolInputPreview(part) }}</pre>
+                            <pre class="overflow-x-auto rounded-sm border border-[#E8E8E8] bg-[#FAFAFA] p-2 text-[11px] leading-5 text-[#434343]">{{ toolInputPreview(part) }}</pre>
                           </div>
                           <div>
                             <div class="mb-1 text-[11px] font-semibold uppercase tracking-[0.18em] text-[#8C8C8C]">Output</div>
-                            <pre class="overflow-x-auto border border-[#E8E8E8] bg-[#FAFAFA] p-2 text-[11px] leading-5 text-[#434343]">{{ toolOutputPreview(part) }}</pre>
+                            <pre class="overflow-x-auto rounded-sm border border-[#E8E8E8] bg-[#FAFAFA] p-2 text-[11px] leading-5 text-[#434343]">{{ toolOutputPreview(part) }}</pre>
                           </div>
-                        </div>
-
-                        <div class="mt-3">
-                          <button class="border border-[#1677FF] bg-white px-3 py-1 text-xs text-[#1677FF] hover:bg-[#E6F4FF]" @click="inspectPart(part)">
-                            Inspect in Sandbox →
-                          </button>
                         </div>
                       </div>
                     </template>
@@ -414,37 +524,78 @@ function sandboxPayload() {
                 class="mb-4 last:mb-0"
               >
                 <div
-                  class="markdown-body whitespace-pre-wrap text-sm leading-7 text-[#1F1F1F]"
+                  class="markdown-body break-words text-sm leading-6 text-[#1F1F1F]"
                   v-html="renderMarkdown(String(part.text || ''))"
                 ></div>
               </div>
 
-              <div v-if="artifactCards(message).length" class="mt-4 space-y-2">
+              <div v-if="chartParts(message).length" class="mt-4 space-y-3">
                 <div
-                  v-for="(part, index) in artifactCards(message)"
-                  :key="`${message.id}-artifact-${index}`"
-                  class="border border-[#D9D9D9] bg-[#FAFAFA] px-3 py-3"
+                  v-for="(part, index) in chartParts(message)"
+                  :key="`${message.id}-chart-${index}`"
+                  class="surface-card rounded-xl border border-[#E1E7EF] bg-white p-4"
                 >
-                  <div class="mb-2 flex items-center justify-between gap-3">
-                    <div class="flex items-center gap-2">
-                      <span class="border border-[#D9D9D9] bg-white px-2 py-1 text-[10px] font-semibold uppercase tracking-[0.18em] text-[#595959]">
-                        {{ dataCardLabel(part) }}
-                      </span>
-                      <span class="text-sm font-medium text-[#1F1F1F]">{{ dataCardTitle(part) }}</span>
-                    </div>
-                    <button class="border border-[#1677FF] bg-white px-3 py-1 text-xs text-[#1677FF] hover:bg-[#E6F4FF]" @click="inspectPart(part)">
-                      Inspect in Sandbox →
-                    </button>
+                  <div class="mb-3 flex items-center gap-2">
+                    <span class="rounded-sm border border-[#D9D9D9] bg-white px-2 py-1 text-[10px] font-semibold uppercase tracking-[0.18em] text-[#595959]">
+                      {{ dataCardLabel(part) }}
+                    </span>
+                    <span class="text-sm font-medium text-[#1F1F1F]">{{ dataCardTitle(part) }}</span>
+                  </div>
+                  <VChart class="h-[320px] w-full rounded-lg bg-[#FBFCFE]" autoresize :option="chartOption(part)" />
+                  <div v-if="part.summary" class="mt-3 text-sm leading-6 text-[#595959]">
+                    {{ part.summary }}
+                  </div>
+                </div>
+              </div>
+
+              <div v-if="tableParts(message).length" class="mt-4 space-y-3">
+                <div
+                  v-for="(part, index) in tableParts(message)"
+                  :key="`${message.id}-table-${index}`"
+                  class="surface-card rounded-xl border border-[#E1E7EF] bg-white p-4"
+                >
+                  <div class="mb-3 flex items-center gap-2">
+                    <span class="rounded-sm border border-[#D9D9D9] bg-white px-2 py-1 text-[10px] font-semibold uppercase tracking-[0.18em] text-[#595959]">
+                      {{ dataCardLabel(part) }}
+                    </span>
+                    <span class="text-sm font-medium text-[#1F1F1F]">{{ dataCardTitle(part) }}</span>
+                  </div>
+                  <el-table :data="tableRows(part)" size="small" stripe row-key="__rowKey" style="width: 100%">
+                    <el-table-column
+                      v-for="column in tableColumns(part)"
+                      :key="column"
+                      :prop="column"
+                      :label="column"
+                      min-width="120"
+                    />
+                  </el-table>
+                  <div v-if="part.summary" class="mt-3 text-sm leading-6 text-[#595959]">
+                    {{ part.summary }}
+                  </div>
+                </div>
+              </div>
+
+              <div v-if="artifactParts(message).length" class="mt-4 space-y-2">
+                <div
+                  v-for="(part, index) in artifactParts(message)"
+                  :key="`${message.id}-artifact-${index}`"
+                  class="surface-card rounded-xl border border-[#E1E7EF] bg-white px-4 py-4"
+                >
+                  <div class="mb-2 flex items-center gap-2">
+                    <span class="rounded-sm border border-[#D9D9D9] bg-white px-2 py-1 text-[10px] font-semibold uppercase tracking-[0.18em] text-[#595959]">
+                      {{ dataCardLabel(part) }}
+                    </span>
+                    <span class="text-sm font-medium text-[#1F1F1F]">{{ dataCardTitle(part) }}</span>
                   </div>
                   <div class="text-sm leading-6 text-[#595959]">
-                    {{ part.summary || '结果已生成，可在右侧 Sandbox 查看完整内容。' }}
+                    {{ part.summary || '结果已生成，但当前仅保留摘要展示。' }}
                   </div>
                 </div>
               </div>
 
               <div
                 v-if="!message.uiParts.length && message.status !== 'completed'"
-                class="border border-dashed border-[#D9D9D9] bg-[#FAFAFA] px-3 py-3 text-sm text-[#8C8C8C]"
+                class="empty-state rounded-xl border border-dashed border-[#D8E0EA] bg-white px-4 py-4 text-sm text-[#8C8C8C]"
               >
                 等待 Worker 产出事件流...
               </div>
@@ -453,131 +604,147 @@ function sandboxPayload() {
         </div>
       </div>
 
-      <div class="shrink-0 border-t border-[#D9D9D9] bg-[#FAFAFA] p-3">
-        <div v-if="errorMessage" class="mb-3 flex items-center gap-2 border border-[#FFCCC7] bg-[#FFF2F0] px-3 py-2 text-sm text-[#CF1322]">
-          <el-icon><Warning /></el-icon>
-          <span>{{ errorMessage }}</span>
-        </div>
+      <div class="shrink-0 border-t border-[#E5EAF1] bg-[#F8FAFC] p-4">
+        <div class="mx-auto w-full max-w-[980px]">
+          <div v-if="errorMessage" class="mb-3 flex items-center gap-2 rounded-lg border border-[#FFCCC7] bg-[#FFF2F0] px-3 py-2 text-sm text-[#CF1322]">
+            <el-icon><Warning /></el-icon>
+            <span>{{ errorMessage }}</span>
+          </div>
 
-        <div class="border border-[#D9D9D9] bg-white">
-          <textarea
-            v-model="composer"
-            class="min-h-[120px] w-full resize-none border-0 bg-transparent p-3 text-sm leading-6 text-[#1F1F1F] outline-none placeholder:text-[#BFBFBF]"
-            placeholder="输入 SQL、自然语言问题或执行指令..."
-            @keydown.enter.exact.prevent="handleSend()"
-          ></textarea>
-
-          <div class="flex items-center justify-between border-t border-[#E8E8E8] bg-[#FAFAFA] px-3 py-2">
-            <div class="text-xs text-[#8C8C8C]">Enter 发送，Shift + Enter 换行。当前执行依赖后端 API 与独立 Worker。</div>
+          <div class="composer-shell relative rounded-xl border border-[#DDE4EE] bg-[#F7F8FA]">
+            <textarea
+              v-model="composer"
+              class="min-h-[88px] w-full resize-none rounded-xl border-0 bg-[#F7F8FA] px-4 pb-8 pt-3 pr-28 text-sm leading-6 text-[#1F1F1F] outline-none placeholder:text-[#98A2B3]"
+              placeholder="输入 SQL、自然语言问题或执行指令..."
+              @keydown.enter.exact.prevent="handleSend()"
+            ></textarea>
+            <div class="pointer-events-none absolute bottom-3 left-4 text-[11px] text-[#98A2B3]">
+              Enter 发送，Shift + Enter 换行
+            </div>
             <button
-              class="flex h-8 items-center justify-center border border-[#1677FF] bg-[#1677FF] px-4 text-sm text-white transition-colors hover:bg-[#4096FF] disabled:border-[#BFBFBF] disabled:bg-[#BFBFBF]"
+              class="primary-action absolute bottom-3 right-3 flex h-9 w-9 shrink-0 items-center justify-center rounded-full border border-[#1677FF] bg-[#1677FF] text-white transition-colors hover:bg-[#3B82F6] disabled:border-[#CAD1DB] disabled:bg-[#CAD1DB]"
               :disabled="isSending || !selectedSkillId"
               @click="handleSend()"
+              :title="isSending ? '发送中' : '发送'"
+              aria-label="发送"
             >
-              {{ isSending ? 'Submitting...' : 'Execute' }}
+              <el-icon v-if="isSending" class="is-loading"><Loading /></el-icon>
+              <el-icon v-else><Promotion /></el-icon>
             </button>
           </div>
         </div>
       </div>
     </main>
-
-    <aside class="flex w-[380px] shrink-0 flex-col bg-[#FAFAFA]">
-      <div class="flex h-12 shrink-0 items-center justify-between border-b border-[#D9D9D9] px-4">
-        <div class="flex items-center gap-2 text-xs font-semibold uppercase tracking-[0.18em] text-[#595959]">
-          <el-icon><DataBoard /></el-icon>
-          Sandbox Inspector
-        </div>
-        <button
-          v-if="selectedDetail"
-          class="border border-[#D9D9D9] bg-white px-2 py-1 text-[11px] text-[#595959] hover:border-[#1677FF] hover:text-[#1677FF]"
-          @click="clearSelectedDetail()"
-        >
-          Clear
-        </button>
-      </div>
-
-      <div class="flex-1 overflow-y-auto bg-white p-4">
-        <div
-          v-if="!selectedDetail"
-          class="flex h-full items-center justify-center border border-dashed border-[#D9D9D9] bg-[#FAFAFA] text-center text-sm text-[#8C8C8C]"
-        >
-          <div>
-            <el-icon :size="24" class="mb-2"><Document /></el-icon>
-            <p>右侧 Sandbox 为空。</p>
-            <p class="mt-1 text-xs">点击任意 “Inspect in Sandbox →” 后，在这里查看完整 JSON、表格或图表。</p>
-          </div>
-        </div>
-
-        <div
-          v-else-if="selectedDetail.isLoading"
-          class="flex h-full items-center justify-center border border-dashed border-[#D9D9D9] bg-[#FAFAFA] text-sm text-[#8C8C8C]"
-        >
-          正在加载 artifact 内容...
-        </div>
-
-        <div
-          v-else-if="selectedDetail.error"
-          class="border border-[#FFCCC7] bg-[#FFF2F0] px-3 py-3 text-sm text-[#CF1322]"
-        >
-          {{ selectedDetail.error }}
-        </div>
-
-        <div v-else class="space-y-4">
-          <div class="border border-[#D9D9D9] bg-[#FAFAFA] px-3 py-3">
-            <div class="mb-2 text-[11px] font-semibold uppercase tracking-[0.18em] text-[#595959]">Selection</div>
-            <div class="text-sm font-medium text-[#1F1F1F]">
-              {{ sandboxContent?.title || sandboxContent?.toolName || sandboxContent?.type || 'detail' }}
-            </div>
-            <div class="mt-2 space-y-1 text-xs text-[#8C8C8C]">
-              <div>Type: {{ sandboxContent?.type }}</div>
-              <div v-if="selectedDetail.artifact">Artifact ID: {{ selectedDetail.artifact.id }}</div>
-              <div v-if="selectedDetail.artifact">Size: {{ selectedDetail.artifact.sizeBytes }} bytes</div>
-              <div v-if="selectedDetail.artifact">Created: {{ formatDateTime(selectedDetail.artifact.createdAt) }}</div>
-            </div>
-          </div>
-
-          <div v-if="sandboxContent && isDataChartPart(sandboxContent)" class="border border-[#D9D9D9] bg-[#FAFAFA] p-3">
-            <div class="mb-3 text-sm font-medium text-[#1F1F1F]">{{ dataCardTitle(sandboxContent) }}</div>
-            <VChart class="h-[320px] w-full bg-white" autoresize :option="chartOption(sandboxContent)" />
-            <div v-if="sandboxContent.summary" class="mt-3 text-sm leading-6 text-[#595959]">
-              {{ sandboxContent.summary }}
-            </div>
-          </div>
-
-          <div v-else-if="sandboxContent && isDataTablePart(sandboxContent)" class="border border-[#D9D9D9] bg-[#FAFAFA] p-3">
-            <div class="mb-3 text-sm font-medium text-[#1F1F1F]">{{ dataCardTitle(sandboxContent) }}</div>
-            <el-table :data="tableRows(sandboxContent)" size="small" stripe row-key="__rowKey" style="width: 100%">
-              <el-table-column
-                v-for="column in tableColumns(sandboxContent)"
-                :key="column"
-                :prop="column"
-                :label="column"
-                min-width="120"
-              />
-            </el-table>
-            <div v-if="sandboxContent.summary" class="mt-3 text-sm leading-6 text-[#595959]">
-              {{ sandboxContent.summary }}
-            </div>
-          </div>
-
-          <div v-else class="border border-[#D9D9D9] bg-[#FAFAFA] p-3">
-            <div class="mb-2 text-[11px] font-semibold uppercase tracking-[0.18em] text-[#595959]">Raw Payload</div>
-            <pre class="overflow-x-auto whitespace-pre-wrap break-all bg-white p-3 text-[12px] leading-5 text-[#434343]">{{ sandboxPayload() }}</pre>
-          </div>
-        </div>
-      </div>
-    </aside>
   </div>
 </template>
 
 <style scoped>
-.style-f-root * {
+.style-f-root {
+  background: #f5f7fb;
+}
+
+.sidebar-shell,
+.history-item,
+.empty-state {
+  box-shadow: 0 8px 20px rgba(15, 23, 42, 0.035);
+}
+
+.sidebar-shell,
+.topbar {
+  backdrop-filter: blur(18px);
+  -webkit-backdrop-filter: blur(18px);
+}
+
+.main-shell,
+.topbar,
+.surface-card,
+.composer-shell {
   box-shadow: none !important;
-  border-radius: 0 !important;
+}
+
+.history-item,
+.surface-card,
+.empty-state,
+.composer-shell,
+.starter-button {
+  border-color: #e4eaf2;
+}
+
+.history-item {
+  border-radius: 14px;
+}
+
+.history-item:hover,
+.starter-button:hover,
+.secondary-action:hover,
+.primary-action:hover {
+  transform: translateY(-1px);
 }
 
 .user-bubble {
-  border-radius: 8px !important;
+  border-radius: 14px !important;
+  box-shadow: 0 10px 20px rgba(23, 92, 211, 0.06);
+}
+
+.skill-select :deep(.el-select__wrapper) {
+  min-height: 42px;
+  border: 1px solid #d7dfea;
+  border-radius: 12px;
+  box-shadow: 0 4px 12px rgba(15, 23, 42, 0.03);
+  background: rgba(255, 255, 255, 0.92);
+  padding: 0 12px;
+  transition:
+    border-color 0.2s ease,
+    background-color 0.2s ease,
+    box-shadow 0.2s ease;
+}
+
+.skill-select :deep(.el-select__wrapper:hover) {
+  border-color: #1677ff;
+}
+
+.skill-select :deep(.el-select__wrapper.is-focused) {
+  border-color: #1677ff;
+  box-shadow: 0 8px 16px rgba(22, 119, 255, 0.08);
+}
+
+.skill-select :deep(.el-select__selected-item) {
+  color: #1f1f1f;
+  font-size: 14px;
+}
+
+.skill-select :deep(.el-select__placeholder) {
+  color: #8c8c8c;
+}
+
+.skill-select :deep(.el-select-dropdown) {
+  border-radius: 12px;
+}
+
+.secondary-action,
+.primary-action,
+.starter-button,
+.history-item {
+  transition:
+    border-color 0.18s ease,
+    background-color 0.18s ease,
+    box-shadow 0.18s ease,
+    transform 0.18s ease;
+}
+
+.starter-button:hover,
+.history-item:hover,
+.secondary-action:hover,
+.primary-action:hover {
+  box-shadow: 0 8px 16px rgba(15, 23, 42, 0.045);
+}
+
+.surface-card {
+  box-shadow: none !important;
+}
+
+.composer-shell {
+  box-shadow: none !important;
 }
 
 details > summary {
@@ -589,18 +756,34 @@ details > summary::-webkit-details-marker {
 }
 
 .markdown-body :deep(p) {
-  margin: 0 0 0.75rem;
+  margin: 0 0 0.45rem;
 }
 
 .markdown-body :deep(p:last-child) {
   margin-bottom: 0;
 }
 
+.markdown-body :deep(ul),
+.markdown-body :deep(ol) {
+  margin: 0.3rem 0 0.45rem;
+  padding-left: 1.1rem;
+}
+
+.markdown-body :deep(li + li) {
+  margin-top: 0.18rem;
+}
+
+.markdown-body :deep(table) {
+  margin: 0.45rem 0;
+}
+
 .markdown-body :deep(pre) {
   overflow-x: auto;
   border: 1px solid #e8e8e8;
   background: #fafafa;
-  padding: 12px;
+  padding: 10px 12px;
+  margin: 0.45rem 0;
+  border-radius: 6px;
 }
 
 .markdown-body :deep(code) {
@@ -610,5 +793,13 @@ details > summary::-webkit-details-marker {
     Consolas,
     monospace;
   font-size: 0.92em;
+}
+
+:deep(.el-table),
+:deep(.el-table th.el-table__cell),
+:deep(.el-table tr),
+:deep(.el-table td.el-table__cell),
+:deep(.el-table__inner-wrapper::before) {
+  box-shadow: none;
 }
 </style>

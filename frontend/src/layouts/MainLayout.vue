@@ -31,10 +31,9 @@ const {
   isSending,
   isBootstrapping,
   errorMessage,
-  activeConversation,
   initialize,
   openConversation,
-  createNewConversation,
+  startConversationWithPrompt,
   handleSend,
   renderMarkdown,
 } = chat
@@ -44,6 +43,24 @@ const conversationSearch = ref('')
 onMounted(async () => {
   await initialize()
 })
+
+function resetToLandingPage() {
+  activeConversationId.value = null
+  messages.value = []
+  composer.value = ''
+}
+
+async function handleHeroSend(shortcut?: string) {
+  const text = shortcut || composer.value.trim()
+  if (!text || isSending.value) return
+  
+  if (shortcut) {
+    composer.value = shortcut
+  }
+  
+  await startConversationWithPrompt(text)
+  composer.value = ''
+}
 
 
 
@@ -164,7 +181,7 @@ const filteredConversations = computed(() => {
       <div class="px-5 py-5">
         <button
           class="flex h-[42px] w-full items-center justify-center rounded-lg bg-[#4F81FF] text-[15px] text-white transition-opacity hover:opacity-90 shadow-[0_2px_8px_rgba(79,129,255,0.25)] font-medium"
-          @click="createNewConversation()"
+          @click="resetToLandingPage()"
         >
           新对话
         </button>
@@ -220,10 +237,69 @@ const filteredConversations = computed(() => {
       <!-- Header Area -->
       <header class="flex h-[40px] shrink-0 items-center justify-between px-8 bg-transparent"></header>
 
-      <!-- Scrollable Message List -->
-      <div class="flex-1 overflow-y-auto px-[40px] pt-4" ref="scrollContainer">
-        <div v-if="isBootstrapping" class="flex h-full items-center justify-center text-[14px] text-[#8C8C8C]">正在加载前后端状态...</div>
-        <div v-else-if="!activeConversation" class="empty-state mx-auto flex h-full max-w-[800px] items-center justify-center text-[14px] text-[#8C8C8C]">从左侧会话历史中继续。</div>
+      <!-- Scrollable Message List / Landing Page -->
+      <div class="flex-1 overflow-y-auto px-[40px] pt-4 flex flex-col" ref="scrollContainer">
+        <div v-if="isBootstrapping" class="flex-1 flex items-center justify-center text-[14px] text-[#8C8C8C]">正在加载前后端状态...</div>
+        
+        <!-- NEW Landing Page (Hero State) -->
+        <div v-else-if="!activeConversationId || (!messages.length)" class="flex-1 flex flex-col items-center justify-center max-w-[800px] mx-auto w-full animate-in fade-in duration-700">
+          <div class="mb-10 text-center">
+            <h1 class="text-[36px] font-bold text-[#1F1F1F] mb-3 tracking-tight">我是 OpenDataAgent</h1>
+            <p class="text-[17px] text-[#595959] font-normal">你的企业级双语数据智能分析助手，随时为你回答任何数据难题</p>
+          </div>
+
+          <div class="w-full relative group">
+            <div class="relative rounded-[24px] border border-[#eff1f5] bg-white shadow-[0_8px_40px_rgba(0,0,0,0.06)] flex flex-col pt-5 pb-5 px-6 transition-all duration-300 focus-within:shadow-[0_12px_50px_rgba(79,129,255,0.14)] focus-within:border-[#C0D3FF]">
+              <textarea
+                v-model="composer"
+                class="min-h-[100px] w-full resize-none border-0 bg-transparent text-[17px] leading-relaxed text-[#1F1F1F] outline-none placeholder:text-[#BbC3D0] placeholder:font-normal"
+                placeholder="在此输入你的数据分析需求，例如：'分析最近一个月的销售趋势'..."
+                @keydown.enter.exact.prevent="handleHeroSend()"
+              ></textarea>
+
+              <div class="flex items-center justify-between mt-4">
+                <div class="flex items-center gap-3 text-[#595959]">
+                  <button class="flex h-[38px] w-[38px] items-center justify-center rounded-[12px] border border-[#E5EAF1] transition-colors hover:bg-[#F4F5F7] shadow-sm">
+                    <svg class="h-[18px] w-[18px]" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="1.8">
+                      <path stroke-linecap="round" stroke-linejoin="round" d="M13.828 10.172a4 4 0 00-5.656 0l-4 4a4 4 0 105.656 5.656l1.102-1.101m-.758-4.899a4 4 0 005.656 0l4-4a4 4 0 00-5.656-5.656l-1.1 1.1" />
+                    </svg>
+                  </button>
+                  <button class="flex h-[38px] w-[38px] items-center justify-center rounded-[12px] border border-[#E5EAF1] transition-colors hover:bg-[#F4F5F7] shadow-sm">
+                    <svg class="h-[18px] w-[18px]" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="1.8">
+                      <path stroke-linecap="round" stroke-linejoin="round" d="M12 6V4m0 2a2 2 0 100 4m0-4a2 2 0 110 4m-6 8a2 2 0 100-4m0 4a2 2 0 110-4m0 4v2m0-6V4m6 6v10m6-2a2 2 0 100-4m0 4a2 2 0 110-4m0 4v2m0-6V4" />
+                    </svg>
+                  </button>
+                </div>
+
+                <button
+                  class="flex h-[42px] px-6 items-center justify-center rounded-full text-white transition-all duration-200 gap-2 font-medium"
+                  :class="(!!composer.trim() && !isSending) ? 'bg-[#4F81FF] hover:bg-[#3D6FE3] shadow-lg shadow-blue-200' : 'bg-[#A2BFFF] cursor-not-allowed'"
+                  :disabled="isSending"
+                  @click="handleHeroSend()"
+                >
+                  <span v-if="!isSending">开启新对话</span>
+                  <el-icon v-if="isSending" class="is-loading"><Loading /></el-icon>
+                  <svg v-else class="h-[18px] w-[18px]" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2.5">
+                    <path stroke-linecap="round" stroke-linejoin="round" d="M12 19V5m-7 7l7-7 7 7" />
+                  </svg>
+                </button>
+              </div>
+            </div>
+          </div>
+
+          <!-- Starter Questions Grid -->
+          <div class="grid grid-cols-2 gap-4 mt-12 w-full">
+            <button 
+              v-for="q in ['最近30天每天各有多少订单', '最近一天销售额最多的客户是谁', '数据库有哪些表', '去年三季度的复购率分析']" 
+              :key="q"
+              class="flex flex-col items-start p-5 rounded-[20px] border border-[#eff1f5] bg-white transition-all hover:border-[#4F81FF] hover:shadow-[0_4px_20px_rgba(79,129,255,0.08)] group text-left"
+              @click="handleHeroSend(q)"
+            >
+              <div class="text-[14.5px] font-medium text-[#1F1F1F] mb-1 group-hover:text-[#4F81FF]">{{ q }}</div>
+              <div class="text-[12.5px] text-[#A0AABF]">点击快速查询数据</div>
+            </button>
+          </div>
+        </div>
 
         <div v-else class="mx-auto w-full max-w-[860px] space-y-8 pb-10">
           <div v-for="message in messages" :key="message.id" class="flex flex-col">
@@ -294,8 +370,8 @@ const filteredConversations = computed(() => {
         </div>
       </div>
 
-      <!-- Input Area -->
-      <div class="px-[40px] pb-[28px] shrink-0">
+      <!-- Input Area (Only in Chat Mode) -->
+      <div v-if="activeConversationId && messages.length" class="px-[40px] pb-[28px] shrink-0">
         <div class="mx-auto w-full max-w-[860px]">
           <div v-if="errorMessage" class="mb-3 flex items-center gap-2 rounded-lg border border-[#FFCCC7] bg-[#FFF2F0] px-3 py-2 text-[14px] text-[#CF1322] shadow-sm">
             <el-icon><Warning /></el-icon> <span>{{ errorMessage }}</span>
